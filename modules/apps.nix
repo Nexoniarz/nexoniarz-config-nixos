@@ -72,5 +72,11 @@ in
     firejail
     gnupg
     lmstudio
+    kdePackages.ark
+    p7zip
+    unzip
+    unrar
+    kdePackages.gwenview
+    kdePackages. kate
   ];
 }
