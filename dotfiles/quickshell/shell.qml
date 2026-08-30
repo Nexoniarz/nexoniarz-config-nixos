@@ -9,9 +9,11 @@
 // menu silently does nothing.
 import QtQuick
 import Quickshell
+import Quickshell.Io
 
 ShellRoot {
     PolkitDialog {}
+    Osd {}
 
     Variants {
         model: Quickshell.screens
@@ -22,6 +24,22 @@ ShellRoot {
             LeftBar { id: leftBarInstance; screen: modelData }
             RightBar { id: rightBarInstance; screen: modelData }
             BottomBar { screen: modelData; leftBar: leftBarInstance; rightBar: rightBarInstance }
+
+            // Lets Hyprland keybinds (Super+Shift+Z/X, see hyprland.conf)
+            // toggle the sidebars via `quickshell ipc call sidebars
+            // toggleLeft/toggleRight` — same open/close behavior as
+            // clicking the arrows on BottomBar.
+            IpcHandler {
+                target: "sidebars"
+                function toggleLeft(): void {
+                    leftBarInstance.expanded = !leftBarInstance.expanded;
+                    if (!leftBarInstance.expanded) leftBarInstance.activePanel = "";
+                }
+                function toggleRight(): void {
+                    rightBarInstance.expanded = !rightBarInstance.expanded;
+                    if (!rightBarInstance.expanded) rightBarInstance.activePanel = "";
+                }
+            }
         }
     }
 }

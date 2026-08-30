@@ -36,6 +36,7 @@ in
     bibata-cursors            # Cursor theme(s) for the cursor picker
     xcur2png                  # Renders Xcursor files to PNG for the cursor picker's previews
     imagemagick                # `identify`, used to pick the right cursor-preview size
+    playerctl                  # MPRIS media control, for the function-key media binds
 
     # Apps
     blender
@@ -66,6 +67,7 @@ in
   # Global command-line utilities available everywhere
   environment.systemPackages = with pkgs; [
     git
+    gh # GitHub CLI — was only installed ad-hoc before (login didn't survive)
     vim
     fastfetch
     gparted
