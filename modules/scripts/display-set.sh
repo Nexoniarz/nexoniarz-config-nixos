@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Applies a monitor mode/position/scale/transform immediately (hyprctl)
-# AND persists it into ~/.config/hypr/display.conf, which hyprland.conf
-# sources — without that file, hyprland.conf's generic fallback rule
+# Applies a full monitor descriptor immediately (hyprctl) AND persists it
+# into ~/.config/hypr/display.conf, which hyprland.conf sources — without
+# that file, hyprland.conf's generic fallback rule
 # ("monitor = , preferred, auto, 1") is the only thing on record, and
 # ANYTHING that makes Hyprland re-evaluate monitor state (observed: even
 # changing the cursor theme via `hyprctl setcursor` does this) reapplies
 # that fallback, silently dropping back to "preferred" refresh rate
 # instead of whatever the user actually picked.
+#
+# Takes the monitor name and everything after it as one pre-built
+# descriptor string (mode,position,scale + optional transform/bitdepth/
+# cm/sdrbrightness/sdrsaturation/vrr/icc keyword,value pairs) rather than
+# fixed positional args — Hyprland's own `monitor` keyword syntax grew
+# past "mode/x/y/scale/transform" (color management, HDR, VRR, ICC), and
+# the caller (LeftFlyout.qml's Displays panel) already has all of that as
+# structured state, so it's simpler for it to build the one string than
+# for this script to accept a growing positional argument list.
 set -euo pipefail
 
-mon="${1:?usage: display-set <monitor> <mode> <x> <y> <scale> [transform]}"
-mode="${2:?mode required}"
-x="${3:?x required}"
-y="${4:?y required}"
-scale="${5:?scale required}"
-transform="${6:-0}"
+mon="${1:?usage: display-set <monitor> <descriptor-tail>}"
+descriptor_tail="${2:?descriptor required}"
 
-descriptor="$mon,$mode,${x}x${y},$scale"
-[ "$transform" != "0" ] && descriptor="$descriptor,transform,$transform"
+descriptor="$mon,$descriptor_tail"
 
 conf="$HOME/.config/hypr/display.conf"
 mkdir -p "$(dirname "$conf")"

@@ -24,6 +24,8 @@ Rectangle {
         volume: "Volume",
         brightness: "Brightness",
         devices: "Devices",
+        system: "System Monitor",
+        weather: "Weather",
         power: "Power"
     })
 
@@ -87,6 +89,8 @@ Rectangle {
             case "volume": return volumePanel;
             case "brightness": return brightnessPanel;
             case "devices": return devicesPanel;
+            case "system": return systemPanel;
+            case "weather": return weatherPanel;
             case "power": return powerPanel;
             default: return emptyPanel;
             }
@@ -142,6 +146,19 @@ Rectangle {
                     font.pixelSize: 11
                 }
 
+                // Hardware/rfkill state isn't reflected by wifiEnabled at all — without
+                // this, a soft- or hardware-killed adapter just looks identical to "no
+                // networks in range" with no way to tell the two apart.
+                Text {
+                    visible: !Networking.wifiHardwareEnabled
+                    text: "Wi-Fi is disabled in hardware (check airplane mode / rfkill switch)"
+                    color: Theme.fgDim
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 11
+                    wrapMode: Text.WordWrap
+                    width: parent.width
+                }
+
                 Repeater {
                     model: Networking.devices
                     delegate: Column {
@@ -149,11 +166,43 @@ Rectangle {
                         spacing: 4
                         property var device: modelData
 
+                        // Wired devices report a single phantom "network" entry with no
+                        // signal strength, so detect Wi-Fi by scannerEnabled (only WifiDevice
+                        // has that property) instead of by networks-list emptiness.
+                        property bool isWifi: device.scannerEnabled !== undefined
+
+                        // The plugin exposes no "scan in progress" signal, just the
+                        // scannerEnabled bool — so this is a grace-period guess, not a
+                        // real status readout. Good enough to stop "no networks yet"
+                        // from looking identical to "scan came back empty", which is
+                        // what made this look like a silent bug before.
+                        property bool scanning: false
+                        Timer {
+                            id: scanGrace
+                            interval: 4000
+                            onTriggered: scanning = false
+                        }
+
                         // Turn on active scanning while this panel is open so
                         // the network list shows more than just whatever we're
                         // already connected to.
-                        Component.onCompleted: if (device.scannerEnabled !== undefined) device.scannerEnabled = true;
-                        Component.onDestruction: if (device.scannerEnabled !== undefined) device.scannerEnabled = false;
+                        Component.onCompleted: if (isWifi) { device.scannerEnabled = true; scanning = true; scanGrace.restart(); }
+                        Component.onDestruction: if (isWifi) device.scannerEnabled = false;
+
+                        // NetworkManager throttles RequestScan, so a bare re-toggle right
+                        // after the last one can be silently ignored — this is still just
+                        // a best-effort nudge, not a guaranteed fresh scan.
+                        function rescan() {
+                            device.scannerEnabled = false;
+                            scanning = true;
+                            scanGrace.restart();
+                            rescanRestart.start();
+                        }
+                        Timer {
+                            id: rescanRestart
+                            interval: 150
+                            onTriggered: device.scannerEnabled = true
+                        }
 
                         Text {
                             text: device.name
@@ -162,10 +211,27 @@ Rectangle {
                             font.pixelSize: 10
                         }
 
-                        // Wired devices report a single phantom "network" entry with no
-                        // signal strength, so detect Wi-Fi by scannerEnabled (only WifiDevice
-                        // has that property) instead of by networks-list emptiness.
-                        property bool isWifi: device.scannerEnabled !== undefined
+                        Rectangle {
+                            visible: isWifi
+                            width: loader.width
+                            height: 26
+                            color: rescanMa.containsMouse ? Theme.bgAlt : "transparent"
+                            border.width: 1
+                            border.color: Theme.borderDim
+                            Text {
+                                anchors.centerIn: parent
+                                text: scanning ? "Scanning…" : "Rescan"
+                                color: scanning ? Theme.accent : Theme.fg
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 11
+                            }
+                            MouseArea {
+                                id: rescanMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: rescan()
+                            }
+                        }
 
                         // Non-Wi-Fi devices — show link state directly instead of a list.
                         Rectangle {
@@ -190,6 +256,14 @@ Rectangle {
                                 hoverEnabled: true
                                 onClicked: netCol.selected = device
                             }
+                        }
+
+                        Text {
+                            visible: isWifi && (!device.networks || device.networks.values.length === 0)
+                            text: scanning ? "Scanning…" : "No networks found"
+                            color: Theme.fgDim
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 11
                         }
 
                         Repeater {
@@ -632,6 +706,22 @@ Rectangle {
             spacing: 10
             width: loader.width
             property var selected: null
+
+            // Same reasoning as the Wi-Fi panel's per-device scannerEnabled
+            // toggle — auto-start scanning while the panel is open instead
+            // of requiring a manual click every time, then stop when it
+            // closes so the adapter isn't left discovering in the background.
+            // Qt.callLater, not a direct write: writing `discovering` in the
+            // same tick this Column is constructed was silently dropped
+            // (verified against BlueZ directly over D-Bus — Discovering
+            // stayed false) even though the identical write from the
+            // manual "Scan for devices" button works fine; deferring one
+            // event-loop tick gives Quickshell's Bluetooth adapter wrapper
+            // time to finish attaching before the write goes out.
+            Component.onCompleted: Qt.callLater(function () {
+                if (Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled) Bluetooth.defaultAdapter.discovering = true;
+            });
+            Component.onDestruction: if (Bluetooth.defaultAdapter) Bluetooth.defaultAdapter.discovering = false;
 
             // --- List view ---------------------------------------------
             Column {
@@ -1432,6 +1522,491 @@ Rectangle {
                                         mountProc.command = ["thunar", drive.mountpoint];
                                         mountProc.running = true;
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- System Monitor -------------------------------------------------------
+    // One process invocation per poll (system-telemetry, modules/scripts/
+    // system-telemetry.sh) instead of separate Process objects per metric —
+    // it reads /proc/stat twice 200ms apart internally to compute CPU%,
+    // /proc/meminfo for RAM, nvidia-smi or the AMD sysfs counters for GPU/
+    // VRAM (whichever's actually present), and `df -h` for / and /home —
+    // and returns it all as one JSON line.
+    Component {
+        id: systemPanel
+        Column {
+            id: sysCol
+            width: loader.width
+            spacing: 14
+            property var stats: ({})
+            property bool haveData: Object.keys(sysCol.stats).length > 0
+
+            Timer {
+                interval: 2000
+                running: true
+                repeat: true
+                triggeredOnStart: true
+                onTriggered: if (!telemetryProc.running) telemetryProc.running = true
+            }
+            Process {
+                id: telemetryProc
+                command: ["system-telemetry"]
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        try { sysCol.stats = JSON.parse(text); } catch (e) { /* keep last good reading */ }
+                    }
+                }
+            }
+
+            Text {
+                visible: !sysCol.haveData
+                text: "Reading system stats..."
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 12
+            }
+
+            // -- CPU --
+            Column {
+                visible: sysCol.haveData
+                width: sysCol.width
+                spacing: 4
+                Item {
+                    width: parent.width
+                    height: 16
+                    Text {
+                        anchors.left: parent.left
+                        text: "CPU"
+                        color: Theme.fg
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        text: (sysCol.stats.cpuPct !== undefined ? sysCol.stats.cpuPct : 0) + "%"
+                        color: Theme.accent
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                    }
+                }
+                Meter { width: parent.width; value: (sysCol.stats.cpuPct || 0) / 100 }
+            }
+
+            // -- RAM --
+            Column {
+                visible: sysCol.haveData
+                width: sysCol.width
+                spacing: 4
+                Item {
+                    width: parent.width
+                    height: 16
+                    Text {
+                        anchors.left: parent.left
+                        text: "Memory"
+                        color: Theme.fg
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        text: ((sysCol.stats.memUsedKb || 0) / 1048576).toFixed(1) + " / "
+                            + ((sysCol.stats.memTotalKb || 0) / 1048576).toFixed(1) + " GB"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 11
+                    }
+                }
+                Meter {
+                    width: parent.width
+                    value: sysCol.stats.memTotalKb > 0 ? sysCol.stats.memUsedKb / sysCol.stats.memTotalKb : 0
+                }
+            }
+
+            // -- GPU / VRAM --
+            Text {
+                visible: sysCol.haveData && (sysCol.stats.gpuPct === undefined || sysCol.stats.gpuPct < 0)
+                text: "No GPU metrics available"
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 11
+            }
+            Column {
+                visible: sysCol.haveData && sysCol.stats.gpuPct >= 0
+                width: sysCol.width
+                spacing: 4
+                Item {
+                    width: parent.width
+                    height: 16
+                    Text {
+                        anchors.left: parent.left
+                        text: "GPU"
+                        color: Theme.fg
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        text: (sysCol.stats.gpuPct !== undefined ? sysCol.stats.gpuPct : 0) + "%"
+                        color: Theme.accent
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                    }
+                }
+                Meter { width: parent.width; value: (sysCol.stats.gpuPct || 0) / 100 }
+            }
+            Column {
+                visible: sysCol.haveData && sysCol.stats.vramTotalMb > 0
+                width: sysCol.width
+                spacing: 4
+                Item {
+                    width: parent.width
+                    height: 16
+                    Text {
+                        anchors.left: parent.left
+                        text: "VRAM"
+                        color: Theme.fg
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        text: (sysCol.stats.vramUsedMb || 0) + " / " + (sysCol.stats.vramTotalMb || 0) + " MB"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 11
+                    }
+                }
+                Meter {
+                    width: parent.width
+                    value: sysCol.stats.vramTotalMb > 0 ? sysCol.stats.vramUsedMb / sysCol.stats.vramTotalMb : 0
+                }
+            }
+
+            // -- Disks --
+            Column {
+                visible: sysCol.haveData && sysCol.stats.disks && sysCol.stats.disks.length > 0
+                width: sysCol.width
+                spacing: 8
+                Text {
+                    text: "STORAGE"
+                    color: Theme.fgDim
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 9
+                    font.bold: true
+                }
+                Repeater {
+                    model: sysCol.stats.disks || []
+                    delegate: Column {
+                        width: parent.width
+                        spacing: 4
+                        property var disk: modelData
+                        Item {
+                            width: parent.width
+                            height: 16
+                            Text {
+                                anchors.left: parent.left
+                                text: disk.mount
+                                color: Theme.fg
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 12
+                            }
+                            Text {
+                                anchors.right: parent.right
+                                text: disk.used + " / " + disk.size
+                                color: Theme.fgDim
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 11
+                            }
+                        }
+                        Meter { width: parent.width; value: (parseFloat(disk.pct) || 0) / 100 }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Weather ---------------------------------------------------------
+    // weather-fetch (modules/scripts/weather-fetch.sh) does the actual
+    // network work — IP-geolocates via ip-api.com by default (or geocodes
+    // an explicitly typed city via Open-Meteo's own geocoding endpoint),
+    // then pulls current + hourly conditions from Open-Meteo. Both are
+    // free and keyless, matching curl everywhere else in this file rather
+    // than QML's own networking (Image loads already had to route around
+    // 403s from a CDN that didn't like Qt's request fingerprint — curl
+    // has been the reliable path for every other external fetch here).
+    Component {
+        id: weatherPanel
+        Column {
+            id: wxCol
+            width: loader.width
+            spacing: 12
+            property var forecast: ({})
+            property bool haveData: !!wxCol.forecast.current
+            property bool hasError: !!wxCol.forecast.error
+
+            Item {
+                id: wxSettings
+                property string city: ""
+                property string stateFile: Quickshell.stateDir + "/weather-settings.json"
+                function save() {
+                    wxSaveProc.command = ["sh", "-c",
+                        "mkdir -p \"$(dirname \"$2\")\" && printf '%s' \"$1\" > \"$2\"",
+                        "--", JSON.stringify({ city: wxSettings.city }), wxSettings.stateFile];
+                    wxSaveProc.running = true;
+                }
+                Process { id: wxSaveProc }
+                Process {
+                    id: wxLoadProc
+                    command: ["cat", wxSettings.stateFile]
+                    stdout: StdioCollector {
+                        onStreamFinished: {
+                            try {
+                                var d = JSON.parse(text);
+                                if (d.city !== undefined) wxSettings.city = d.city;
+                            } catch (e) { /* no state file yet — defaults stand */ }
+                            wxCol.refresh();
+                        }
+                    }
+                }
+                Component.onCompleted: wxLoadProc.running = true
+            }
+
+            function refresh() {
+                fetchProc.command = wxSettings.city.length > 0
+                    ? ["weather-fetch", wxSettings.city] : ["weather-fetch"];
+                fetchProc.running = true;
+            }
+            Process {
+                id: fetchProc
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        try { wxCol.forecast = JSON.parse(text); } catch (e) { wxCol.forecast = { error: "bad response" }; }
+                    }
+                }
+            }
+            // Open-Meteo's current reading updates roughly every 15
+            // minutes on their end — polling faster would just repeat the
+            // same numbers.
+            Timer { interval: 900000; running: true; repeat: true; onTriggered: wxCol.refresh() }
+
+            // WMO weather codes -> a short label + a plain Unicode symbol
+            // (not a Nerd Font glyph — those need exact codepoints from
+            // the specific icon set and guessing wrong renders as a
+            // tofu box; these are plain emoji, safe under any font with
+            // emoji fallback, which every font on this system has).
+            function describeCode(code) {
+                if (code === 0) return { label: "Clear sky", icon: "☀" };
+                if (code === 1) return { label: "Mostly clear", icon: "🌤" };
+                if (code === 2) return { label: "Partly cloudy", icon: "⛅" };
+                if (code === 3) return { label: "Overcast", icon: "☁" };
+                if (code === 45 || code === 48) return { label: "Fog", icon: "🌫" };
+                if (code >= 51 && code <= 57) return { label: "Drizzle", icon: "🌦" };
+                if (code >= 61 && code <= 67) return { label: "Rain", icon: "🌧" };
+                if (code >= 71 && code <= 77) return { label: "Snow", icon: "❄" };
+                if (code >= 80 && code <= 82) return { label: "Showers", icon: "🌧" };
+                if (code === 85 || code === 86) return { label: "Snow showers", icon: "🌨" };
+                if (code >= 95) return { label: "Thunderstorm", icon: "⛈" };
+                return { label: "Unknown", icon: "?" };
+            }
+
+            // -- City search (blank = auto IP-geolocate) --
+            Row {
+                width: wxCol.width
+                spacing: 6
+                Rectangle {
+                    width: parent.width - 66
+                    height: 30
+                    color: Theme.bgAlt
+                    border.width: 1
+                    border.color: Theme.border
+                    TextInput {
+                        id: cityInput
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        text: wxSettings.city
+                        onTextEdited: wxSettings.city = text
+                        color: Theme.fg
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                        clip: true
+                        Keys.onReturnPressed: { wxSettings.save(); wxCol.forecast = {}; wxCol.refresh(); }
+                        Text {
+                            visible: cityInput.text.length === 0
+                            text: "City (blank = auto-detect)"
+                            color: Theme.fgDim
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 12
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 60
+                    height: 30
+                    color: wxSearchMa.containsMouse ? Theme.bgAlt : "transparent"
+                    border.width: 1
+                    border.color: Theme.accent
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Set"
+                        color: Theme.accent
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 11
+                    }
+                    MouseArea {
+                        id: wxSearchMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: { wxSettings.save(); wxCol.forecast = {}; wxCol.refresh(); }
+                    }
+                }
+            }
+
+            Text {
+                visible: !wxCol.haveData && !wxCol.hasError
+                text: "Loading weather..."
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 12
+            }
+            Text {
+                visible: wxCol.hasError
+                text: "Couldn't load weather — check the city name or try again later."
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
+                width: wxCol.width
+            }
+
+            // -- Current conditions --
+            Column {
+                visible: wxCol.haveData
+                width: wxCol.width
+                spacing: 4
+
+                Text {
+                    text: [wxCol.forecast.place, wxCol.forecast.country].filter((s) => s && s.length > 0).join(", ")
+                    color: Theme.fgDim
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 10
+                }
+
+                Row {
+                    spacing: 12
+                    Text {
+                        text: wxCol.haveData ? wxCol.describeCode(wxCol.forecast.current.weather_code).icon : ""
+                        font.pixelSize: 40
+                    }
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 2
+                        Text {
+                            text: wxCol.haveData ? Math.round(wxCol.forecast.current.temperature_2m) + "°C" : ""
+                            color: Theme.fg
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 24
+                            font.bold: true
+                        }
+                        Text {
+                            text: wxCol.haveData ? wxCol.describeCode(wxCol.forecast.current.weather_code).label : ""
+                            color: Theme.fgDim
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+
+                Row {
+                    spacing: 16
+                    Text {
+                        text: wxCol.haveData ? ("Wind: " + wxCol.forecast.current.wind_speed_10m + " km/h") : ""
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 10
+                    }
+                    Text {
+                        text: wxCol.haveData ? ("Precip: " + wxCol.forecast.current.precipitation + " mm") : ""
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 10
+                    }
+                }
+            }
+
+            Rectangle { visible: wxCol.haveData; width: wxCol.width; height: 1; color: Theme.borderDim }
+
+            // -- Hourly forecast timeline --
+            Column {
+                visible: wxCol.haveData && !!wxCol.forecast.hourly
+                width: wxCol.width
+                spacing: 8
+                Text {
+                    text: "NEXT HOURS"
+                    color: Theme.fgDim
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 9
+                    font.bold: true
+                }
+                Flow {
+                    width: wxCol.width
+                    spacing: 6
+                    Repeater {
+                        // Only future hours from "now" — Open-Meteo's hourly
+                        // array starts at local midnight, not the current
+                        // hour, so without this the timeline would open
+                        // showing most of a day that's already passed.
+                        model: {
+                            if (!wxCol.haveData || !wxCol.forecast.hourly) return [];
+                            var nowIso = wxCol.forecast.current.time.substring(0, 13);
+                            var times = wxCol.forecast.hourly.time;
+                            var startIdx = 0;
+                            for (var i = 0; i < times.length; i++) {
+                                if (times[i].substring(0, 13) >= nowIso) { startIdx = i; break; }
+                            }
+                            var out = [];
+                            for (var j = startIdx; j < Math.min(startIdx + 8, times.length); j++) out.push(j);
+                            return out;
+                        }
+                        delegate: Rectangle {
+                            property int idx: modelData
+                            width: (wxCol.width - 30) / 4
+                            height: 64
+                            color: Theme.bgAlt
+                            border.width: 1
+                            border.color: Theme.borderDim
+                            Column {
+                                anchors.centerIn: parent
+                                spacing: 2
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: wxCol.forecast.hourly.time[idx].substring(11, 16)
+                                    color: Theme.fgDim
+                                    font.family: "JetBrainsMono Nerd Font"
+                                    font.pixelSize: 9
+                                }
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: wxCol.describeCode(wxCol.forecast.hourly.weather_code[idx]).icon
+                                    font.pixelSize: 16
+                                }
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: Math.round(wxCol.forecast.hourly.temperature_2m[idx]) + "°"
+                                    color: Theme.fg
+                                    font.family: "JetBrainsMono Nerd Font"
+                                    font.pixelSize: 11
+                                    font.bold: true
                                 }
                             }
                         }

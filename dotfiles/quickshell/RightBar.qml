@@ -173,6 +173,16 @@ PanelWindow {
                 active: root.activePanel === "devices"
                 onClicked: root.toggle("devices")
             }
+            SidebarRow {
+                label: "System Monitor"
+                active: root.activePanel === "system"
+                onClicked: root.toggle("system")
+            }
+            SidebarRow {
+                label: "Weather"
+                active: root.activePanel === "weather"
+                onClicked: root.toggle("weather")
+            }
         }
     }
 

@@ -189,15 +189,48 @@ Rectangle {
     }
 
     // --- Displays ---------------------------------------------------------
-    // Mode/scale/rotation are edited locally per monitor (starting from its
-    // current live values) and only actually applied when "Apply" is
-    // clicked, via `hyprctl keyword monitor ...` — same mechanism Hyprland
-    // itself uses, so it's an immediate, real change, not a config-file edit.
+    // Mode/scale/rotation/color are edited locally per monitor (starting
+    // from its current live values) and only actually applied when "Apply"
+    // is clicked, via `hyprctl keyword monitor ...` — same mechanism
+    // Hyprland itself uses, so it's an immediate, real change, not a
+    // config-file edit. display-set (modules/scripts/display-set.sh) then
+    // also persists the exact same descriptor into display.conf so it
+    // survives a Hyprland restart.
     Component {
         id: settingsPanel
         Column {
+            id: dispRoot
             width: loader.width
             spacing: 16
+
+            // Hyprland's `monitor` keyword takes the FULL descriptor every
+            // time — there's no way to change just one field. hyprctl's own
+            // readback (Hyprland.monitors / lastIpcObject) covers most of
+            // that (mode, scale, transform, bitdepth via currentFormat, cm,
+            // sdrBrightness/Saturation, vrr) but NOT icc (never reported
+            // back anywhere in `hyprctl monitors -j`). So this tracks
+            // whatever WE last applied per monitor, keyed by name, and
+            // every apply (including a plain drag-to-reposition on the
+            // canvas below) resends the last-known-good value for every
+            // field, live-readback for anything never customized —
+            // otherwise repositioning a monitor with a custom ICC profile
+            // would silently drop that profile on the next apply.
+            property var overrides: ({})
+            function ovr(name) { return dispRoot.overrides[name] || ({}); }
+            function setOvr(name, patch) {
+                var updated = {};
+                for (var k in dispRoot.overrides) updated[k] = dispRoot.overrides[k];
+                var merged = {};
+                var cur = updated[name] || ({});
+                for (var k2 in cur) merged[k2] = cur[k2];
+                for (var k3 in patch) merged[k3] = patch[k3];
+                updated[name] = merged;
+                dispRoot.overrides = updated;
+            }
+            function posFor(name, lx, ly) {
+                var o = dispRoot.overrides[name];
+                return (o && o.x !== undefined) ? { x: o.x, y: o.y } : { x: lx, y: ly };
+            }
 
             Text {
                 visible: Hyprland.monitors.values.length === 0
@@ -206,6 +239,173 @@ Rectangle {
                 font.family: "JetBrainsMono Nerd Font"
                 font.pixelSize: 12
             }
+
+            // -- Arrangement canvas --------------------------------------
+            // Drag-to-position, like every other DE's display panel — the
+            // only way to set position at all before this (previously the
+            // per-monitor Apply always resent the monitor's own current
+            // x/y unchanged, so multi-monitor layout couldn't be edited
+            // from this panel).
+            Column {
+                id: arrColumn
+                visible: Hyprland.monitors.values.length > 0
+                width: parent.width
+                spacing: 6
+
+                Text {
+                    text: "Arrangement"
+                    color: Theme.fg
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 13
+                    font.bold: true
+                }
+                Text {
+                    text: "Drag to position screens — edges snap together."
+                    color: Theme.fgDim
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 9
+                }
+
+                // Logical (post-scale) bounding box of every monitor's
+                // current-or-pending position, fit into the canvas — this
+                // is what Hyprland actually tiles monitors in, not raw
+                // pixel mode size.
+                property real cScale: {
+                    var maxX = 1, maxY = 1;
+                    for (var i = 0; i < Hyprland.monitors.values.length; i++) {
+                        var mm = Hyprland.monitors.values[i];
+                        var p = dispRoot.posFor(mm.name, mm.x, mm.y);
+                        maxX = Math.max(maxX, p.x + mm.width / mm.scale);
+                        maxY = Math.max(maxY, p.y + mm.height / mm.scale);
+                    }
+                    return Math.min((loader.width - 4) / maxX, 130 / maxY);
+                }
+
+                Item {
+                    id: arrCanvas
+                    width: loader.width
+                    height: 140
+
+                    Repeater {
+                        model: Hyprland.monitors
+                        delegate: Rectangle {
+                            id: monRect
+                            property var m: modelData
+                            property real lw: m.width / m.scale
+                            property real lh: m.height / m.scale
+                            property var pos: dispRoot.posFor(m.name, m.x, m.y)
+                            property bool dragging: false
+                            property real baseX: pos.x * arrColumn.cScale
+                            property real baseY: pos.y * arrColumn.cScale
+                            property real offX: 0
+                            property real offY: 0
+                            width: Math.max(28, lw * arrColumn.cScale)
+                            height: Math.max(28, lh * arrColumn.cScale)
+                            x: baseX + (dragging ? offX : 0)
+                            y: baseY + (dragging ? offY : 0)
+                            color: dragging ? Theme.accent : Theme.bgAlt
+                            border.width: 2
+                            border.color: m.focused ? Theme.accent : Theme.border
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: monRect.m.name
+                                color: monRect.dragging ? Theme.bg : Theme.fg
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 10
+                            }
+
+                            Process { id: moveProc }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                // Nothing to arrange a single screen relative
+                                // to — disabled outright rather than just
+                                // no-op-ing onReleased, so it doesn't even
+                                // hover/cursor-hint as draggable.
+                                enabled: Hyprland.monitors.values.length > 1
+                                hoverEnabled: true
+                                cursorShape: Qt.SizeAllCursor
+                                property real pressX: 0
+                                property real pressY: 0
+                                onPressed: (mouse) => {
+                                    monRect.dragging = true;
+                                    pressX = mouse.x;
+                                    pressY = mouse.y;
+                                }
+                                onPositionChanged: (mouse) => {
+                                    if (!monRect.dragging) return;
+                                    monRect.offX += (mouse.x - pressX);
+                                    monRect.offY += (mouse.y - pressY);
+                                }
+                                onReleased: {
+                                    var scale = arrColumn.cScale;
+                                    var rawX = (monRect.baseX + monRect.offX) / scale;
+                                    var rawY = (monRect.baseY + monRect.offY) / scale;
+
+                                    // Snap to any other monitor's edges within a
+                                    // small threshold — hand-aligning pixel-exact
+                                    // is otherwise a losing game against a
+                                    // ~300px canvas representing a desktop
+                                    // that's thousands of pixels wide.
+                                    var snapPx = 10 / scale;
+                                    var bestX = rawX, bestY = rawY, bestDX = snapPx, bestDY = snapPx;
+                                    for (var i = 0; i < Hyprland.monitors.values.length; i++) {
+                                        var other = Hyprland.monitors.values[i];
+                                        if (other.name === monRect.m.name) continue;
+                                        var op = dispRoot.posFor(other.name, other.x, other.y);
+                                        var ow = other.width / other.scale, oh = other.height / other.scale;
+                                        var xs = [op.x - monRect.lw, op.x, op.x + ow - monRect.lw, op.x + ow];
+                                        var ys = [op.y - monRect.lh, op.y, op.y + oh - monRect.lh, op.y + oh];
+                                        for (var xi = 0; xi < xs.length; xi++) {
+                                            var dx = Math.abs(xs[xi] - rawX);
+                                            if (dx < bestDX) { bestDX = dx; bestX = xs[xi]; }
+                                        }
+                                        for (var yi = 0; yi < ys.length; yi++) {
+                                            var dy = Math.abs(ys[yi] - rawY);
+                                            if (dy < bestDY) { bestDY = dy; bestY = ys[yi]; }
+                                        }
+                                    }
+
+                                    var finalX = Math.round(bestX);
+                                    var finalY = Math.round(bestY);
+                                    monRect.dragging = false;
+                                    monRect.offX = 0;
+                                    monRect.offY = 0;
+
+                                    var ov = dispRoot.ovr(monRect.m.name);
+                                    var ipc = monRect.m.lastIpcObject || ({});
+                                    var bitdepth = ov.bitdepth !== undefined ? ov.bitdepth :
+                                        ((ipc.currentFormat && ipc.currentFormat.indexOf("2101010") !== -1) ? "10" : "8");
+                                    var cm = ov.cm !== undefined ? ov.cm : (ipc.colorManagementPreset || "srgb");
+                                    var sdrB = ov.sdrBrightness !== undefined ? ov.sdrBrightness : (ipc.sdrBrightness !== undefined ? ipc.sdrBrightness : 1.0);
+                                    var sdrS = ov.sdrSaturation !== undefined ? ov.sdrSaturation : (ipc.sdrSaturation !== undefined ? ipc.sdrSaturation : 1.0);
+                                    var vrr = ov.vrr !== undefined ? ov.vrr : !!ipc.vrr;
+                                    var icc = ov.icc !== undefined ? ov.icc : "";
+                                    var mode = monRect.m.width + "x" + monRect.m.height + "@" + (ipc.refreshRate || 60).toFixed(2) + "Hz";
+                                    var tail = mode + "," + finalX + "x" + finalY + "," + monRect.m.scale.toFixed(2)
+                                        + ",transform," + (ipc.transform || 0)
+                                        + ",bitdepth," + bitdepth
+                                        + ",cm," + cm
+                                        + ",sdrbrightness," + sdrB.toFixed(2)
+                                        + ",sdrsaturation," + sdrS.toFixed(2)
+                                        + ",vrr," + (vrr ? "1" : "0")
+                                        + (icc.length > 0 ? ",icc," + icc : "");
+
+                                    dispRoot.setOvr(monRect.m.name, {
+                                        x: finalX, y: finalY, bitdepth: bitdepth, cm: cm,
+                                        sdrBrightness: sdrB, sdrSaturation: sdrS, vrr: vrr, icc: icc
+                                    });
+                                    moveProc.command = ["display-set", monRect.m.name, tail];
+                                    moveProc.running = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { width: parent.width; height: 1; color: Theme.borderDim }
 
             Repeater {
                 model: Hyprland.monitors
@@ -216,6 +416,7 @@ Rectangle {
                     property var mon: modelData
                     property var ipc: mon.lastIpcObject || ({})
                     property var modes: ipc.availableModes || []
+                    property var ov: dispRoot.ovr(mon.name)
                     // Picks the mode matching both the current resolution
                     // AND the closest actual refresh rate — matching on
                     // resolution alone (and just taking whichever mode
@@ -241,6 +442,24 @@ Rectangle {
                     property real selectedScale: mon.scale
                     property int selectedTransform: ipc.transform || 0
                     property bool modesOpen: false
+
+                    // Bit depth Hyprland actually requests from the GPU for
+                    // this output — 8 or 10 only. Not the monitor panel's
+                    // real physical depth (plenty of "8-bit" panels are
+                    // 6-bit+FRC underneath): Hyprland has no way to query or
+                    // change that, it's fixed in the panel's own hardware.
+                    property string selectedBitdepth: monDelegate.ov.bitdepth !== undefined ? monDelegate.ov.bitdepth :
+                        ((ipc.currentFormat && ipc.currentFormat.indexOf("2101010") !== -1) ? "10" : "8")
+                    property string selectedCm: monDelegate.ov.cm !== undefined ? monDelegate.ov.cm : (ipc.colorManagementPreset || "srgb")
+                    property real selectedSdrBrightness: monDelegate.ov.sdrBrightness !== undefined ? monDelegate.ov.sdrBrightness :
+                        (ipc.sdrBrightness !== undefined ? ipc.sdrBrightness : 1.0)
+                    property real selectedSdrSaturation: monDelegate.ov.sdrSaturation !== undefined ? monDelegate.ov.sdrSaturation :
+                        (ipc.sdrSaturation !== undefined ? ipc.sdrSaturation : 1.0)
+                    property bool selectedVrr: monDelegate.ov.vrr !== undefined ? monDelegate.ov.vrr : !!ipc.vrr
+                    // Never read back from hyprctl (see dispRoot.overrides
+                    // comment above) — blank here just means "nothing typed
+                    // this session", not "no profile is active".
+                    property string selectedIcc: monDelegate.ov.icc !== undefined ? monDelegate.ov.icc : ""
 
                     Process { id: applyProc; command: [] }
 
@@ -417,6 +636,232 @@ Rectangle {
                         }
                     }
 
+                    // -- Bit depth --
+                    Text {
+                        text: "Bit depth"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 9
+                        font.bold: true
+                    }
+                    Row {
+                        spacing: 6
+                        Repeater {
+                            model: ["8", "10"]
+                            delegate: Rectangle {
+                                property string bd: modelData
+                                width: 64; height: 26
+                                color: monDelegate.selectedBitdepth === bd ? Theme.accent : (bdMa.containsMouse ? Theme.bgAlt : "transparent")
+                                border.width: 1
+                                border.color: monDelegate.selectedBitdepth === bd ? Theme.accent : Theme.border
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: bd + "-bit"
+                                    color: monDelegate.selectedBitdepth === bd ? Theme.bg : Theme.fg
+                                    font.family: "JetBrainsMono Nerd Font"
+                                    font.pixelSize: 11
+                                }
+                                MouseArea {
+                                    id: bdMa
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: monDelegate.selectedBitdepth = bd
+                                }
+                            }
+                        }
+                    }
+
+                    // -- Color management preset --
+                    Text {
+                        text: "Color profile"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 9
+                        font.bold: true
+                    }
+                    Row {
+                        spacing: 6
+                        Repeater {
+                            model: [
+                                { v: "srgb", label: "sRGB" },
+                                { v: "wide", label: "Wide" },
+                                { v: "edid", label: "EDID" },
+                                { v: "hdredid", label: "HDR" }
+                            ]
+                            delegate: Rectangle {
+                                property string cv: modelData.v
+                                width: (monDelegate.width - 18) / 4; height: 26
+                                color: monDelegate.selectedCm === cv ? Theme.accent : (cmMa.containsMouse ? Theme.bgAlt : "transparent")
+                                border.width: 1
+                                border.color: monDelegate.selectedCm === cv ? Theme.accent : Theme.border
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    color: monDelegate.selectedCm === cv ? Theme.bg : Theme.fg
+                                    font.family: "JetBrainsMono Nerd Font"
+                                    font.pixelSize: 10
+                                }
+                                MouseArea {
+                                    id: cmMa
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: monDelegate.selectedCm = cv
+                                }
+                            }
+                        }
+                    }
+
+                    // -- SDR brightness/saturation -- only meaningful once
+                    // the panel isn't running straight sRGB (Hyprland warns
+                    // about exactly this: wide/HDR presets need these to
+                    // compensate tone-mapping, sRGB doesn't touch them).
+                    Text {
+                        visible: monDelegate.selectedCm !== "srgb"
+                        text: "SDR brightness: " + monDelegate.selectedSdrBrightness.toFixed(2) + "x"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 9
+                        font.bold: true
+                    }
+                    Row {
+                        visible: monDelegate.selectedCm !== "srgb"
+                        spacing: 6
+                        Rectangle {
+                            width: 30; height: 26
+                            color: sdrBDownMa.containsMouse ? Theme.bgAlt : "transparent"
+                            border.width: 1
+                            border.color: Theme.border
+                            Text { anchors.centerIn: parent; text: "-"; color: Theme.fg; font.pixelSize: 14 }
+                            MouseArea {
+                                id: sdrBDownMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: monDelegate.selectedSdrBrightness = Math.max(0.1, Math.round((monDelegate.selectedSdrBrightness - 0.05) * 100) / 100)
+                            }
+                        }
+                        Rectangle {
+                            width: 30; height: 26
+                            color: sdrBUpMa.containsMouse ? Theme.bgAlt : "transparent"
+                            border.width: 1
+                            border.color: Theme.border
+                            Text { anchors.centerIn: parent; text: "+"; color: Theme.fg; font.pixelSize: 14 }
+                            MouseArea {
+                                id: sdrBUpMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: monDelegate.selectedSdrBrightness = Math.min(3.0, Math.round((monDelegate.selectedSdrBrightness + 0.05) * 100) / 100)
+                            }
+                        }
+                    }
+                    Text {
+                        visible: monDelegate.selectedCm !== "srgb"
+                        text: "SDR saturation: " + monDelegate.selectedSdrSaturation.toFixed(2) + "x"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 9
+                        font.bold: true
+                    }
+                    Row {
+                        visible: monDelegate.selectedCm !== "srgb"
+                        spacing: 6
+                        Rectangle {
+                            width: 30; height: 26
+                            color: sdrSDownMa.containsMouse ? Theme.bgAlt : "transparent"
+                            border.width: 1
+                            border.color: Theme.border
+                            Text { anchors.centerIn: parent; text: "-"; color: Theme.fg; font.pixelSize: 14 }
+                            MouseArea {
+                                id: sdrSDownMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: monDelegate.selectedSdrSaturation = Math.max(0.1, Math.round((monDelegate.selectedSdrSaturation - 0.05) * 100) / 100)
+                            }
+                        }
+                        Rectangle {
+                            width: 30; height: 26
+                            color: sdrSUpMa.containsMouse ? Theme.bgAlt : "transparent"
+                            border.width: 1
+                            border.color: Theme.border
+                            Text { anchors.centerIn: parent; text: "+"; color: Theme.fg; font.pixelSize: 14 }
+                            MouseArea {
+                                id: sdrSUpMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: monDelegate.selectedSdrSaturation = Math.min(2.0, Math.round((monDelegate.selectedSdrSaturation + 0.05) * 100) / 100)
+                            }
+                        }
+                    }
+
+                    // -- ICC profile --
+                    Text {
+                        text: "ICC profile (optional)"
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 9
+                        font.bold: true
+                    }
+                    Row {
+                        spacing: 6
+                        Rectangle {
+                            width: monDelegate.width - 62
+                            height: 30
+                            color: Theme.bgAlt
+                            border.width: 1
+                            border.color: Theme.border
+                            TextInput {
+                                id: iccInput
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                text: monDelegate.selectedIcc
+                                onTextEdited: monDelegate.selectedIcc = text
+                                color: Theme.fg
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 11
+                                clip: true
+                                Text {
+                                    visible: iccInput.text.length === 0
+                                    text: "/path/to/profile.icc"
+                                    color: Theme.fgDim
+                                    font.family: "JetBrainsMono Nerd Font"
+                                    font.pixelSize: 11
+                                }
+                            }
+                        }
+                        Rectangle {
+                            width: 56; height: 30
+                            color: clearIccMa.containsMouse ? Theme.bgAlt : "transparent"
+                            border.width: 1
+                            border.color: Theme.border
+                            Text { anchors.centerIn: parent; text: "Clear"; color: Theme.fg; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10 }
+                            MouseArea {
+                                id: clearIccMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: monDelegate.selectedIcc = ""
+                            }
+                        }
+                    }
+
+                    // -- VRR --
+                    Item {
+                        width: monDelegate.width
+                        height: 26
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Variable refresh rate"
+                            color: Theme.fg
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 11
+                        }
+                        ToggleSwitch {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            checked: monDelegate.selectedVrr
+                            onToggled: monDelegate.selectedVrr = !monDelegate.selectedVrr
+                        }
+                    }
+
                     // -- Apply --
                     Rectangle {
                         width: monDelegate.width
@@ -438,9 +883,22 @@ Rectangle {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                applyProc.command = ["display-set", monDelegate.mon.name,
-                                    monDelegate.selectedMode, String(monDelegate.mon.x), String(monDelegate.mon.y),
-                                    monDelegate.selectedScale.toFixed(2), String(monDelegate.selectedTransform)];
+                                var pos = dispRoot.posFor(monDelegate.mon.name, monDelegate.mon.x, monDelegate.mon.y);
+                                var tail = monDelegate.selectedMode + "," + pos.x + "x" + pos.y + "," + monDelegate.selectedScale.toFixed(2)
+                                    + ",transform," + monDelegate.selectedTransform
+                                    + ",bitdepth," + monDelegate.selectedBitdepth
+                                    + ",cm," + monDelegate.selectedCm
+                                    + ",sdrbrightness," + monDelegate.selectedSdrBrightness.toFixed(2)
+                                    + ",sdrsaturation," + monDelegate.selectedSdrSaturation.toFixed(2)
+                                    + ",vrr," + (monDelegate.selectedVrr ? "1" : "0")
+                                    + (monDelegate.selectedIcc.length > 0 ? ",icc," + monDelegate.selectedIcc : "");
+
+                                dispRoot.setOvr(monDelegate.mon.name, {
+                                    x: pos.x, y: pos.y, bitdepth: monDelegate.selectedBitdepth, cm: monDelegate.selectedCm,
+                                    sdrBrightness: monDelegate.selectedSdrBrightness, sdrSaturation: monDelegate.selectedSdrSaturation,
+                                    vrr: monDelegate.selectedVrr, icc: monDelegate.selectedIcc
+                                });
+                                applyProc.command = ["display-set", monDelegate.mon.name, tail];
                                 applyProc.running = true;
                             }
                         }
@@ -515,6 +973,31 @@ Rectangle {
             function refresh() {
                 staticListProc.running = true;
                 animatedListProc.running = true;
+                currentProc.running = true;
+            }
+
+            // Reads back the actually-active wallpaper so the grid can
+            // highlight it on open — wpCol.current previously only ever
+            // got set by clicking a tile *this session*, so a wallpaper
+            // set before Quickshell last restarted (including the normal
+            // wallpaper-restore-on-login path) never showed as selected
+            // even though it really was active. wallpaper-set's own state
+            // file is a real `wallpaper-set <path> ...` command line
+            // (shell-quoted via printf %q) — sourcing it with the
+            // function shadowed to just echo its first argument is a
+            // simple, correct way to pull the path back out without
+            // re-implementing shell-quote parsing in JS.
+            Process {
+                id: currentProc
+                command: ["bash", "-c",
+                    'wallpaper-set() { printf "%s\\n" "$1"; }; source "$1" 2>/dev/null',
+                    "--", Quickshell.env("HOME") + "/.config/hypr/wallpaper.conf"]
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        var p = text.trim();
+                        if (p.length > 0) wpCol.current = p;
+                    }
+                }
             }
 
             function apply(path) {
@@ -552,9 +1035,41 @@ Rectangle {
                 stdout: StdioCollector {
                     onStreamFinished: {
                         wpCol.animatedImages = text.split("\n").filter((s) => s.length > 0);
+                        wpCol.refreshThumbs();
                     }
                 }
             }
+
+            // path -> cached preview JPEG, filled in by wallpaper-thumbs
+            // (modules/scripts/wallpaper-thumbs.sh) once it's generated a
+            // real first-frame thumbnail for each animated file — a tile
+            // with no entry here just falls back to the play-icon glyph
+            // (thumbnail not generated yet, or ffmpeg couldn't read that
+            // file). Re-run any time the animated file list changes, not
+            // just once, so newly-added videos get a thumbnail without
+            // needing a full panel close/reopen.
+            property var thumbMap: ({})
+            property string thumbCacheDir: Quickshell.cacheDir + "/wallpaper-thumbs"
+            function refreshThumbs() {
+                if (wpCol.animatedImages.length === 0) return;
+                thumbProc.command = ["wallpaper-thumbs", wpCol.thumbCacheDir].concat(wpCol.animatedImages);
+                thumbProc.running = true;
+            }
+            Process {
+                id: thumbProc
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        var map = {};
+                        var lines = text.split("\n").filter((s) => s.length > 0);
+                        for (var i = 0; i < lines.length; i++) {
+                            var parts = lines[i].split("\t");
+                            if (parts.length === 2) map[parts[0]] = parts[1];
+                        }
+                        wpCol.thumbMap = map;
+                    }
+                }
+            }
+
             Component.onCompleted: wpCol.refresh()
 
             Process { id: setProc; command: [] }
@@ -567,6 +1082,44 @@ Rectangle {
                 font.pixelSize: 10
                 wrapMode: Text.WordWrap
                 width: wpCol.width
+            }
+
+            // -- Search --
+            property string filterText: ""
+            property var filteredStatic: {
+                if (wpCol.filterText.length === 0) return wpCol.staticImages;
+                var q = wpCol.filterText.toLowerCase();
+                return wpCol.staticImages.filter((p) => p.toLowerCase().indexOf(q) !== -1);
+            }
+            property var filteredAnimated: {
+                if (wpCol.filterText.length === 0) return wpCol.animatedImages;
+                var q = wpCol.filterText.toLowerCase();
+                return wpCol.animatedImages.filter((p) => p.toLowerCase().indexOf(q) !== -1);
+            }
+            Rectangle {
+                width: wpCol.width
+                height: 30
+                color: Theme.bgAlt
+                border.width: 1
+                border.color: Theme.border
+                TextInput {
+                    id: filterInput
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    text: wpCol.filterText
+                    onTextEdited: wpCol.filterText = text
+                    color: Theme.fg
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 12
+                    clip: true
+                    Text {
+                        visible: filterInput.text.length === 0
+                        text: "Filter by filename..."
+                        color: Theme.fgDim
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: 12
+                    }
+                }
             }
 
             // -- Settings --
@@ -749,9 +1302,17 @@ Rectangle {
                 font.family: "JetBrainsMono Nerd Font"
                 font.pixelSize: 12
             }
+            Text {
+                visible: (wpCol.staticImages.length > 0 || wpCol.animatedImages.length > 0)
+                    && wpCol.filteredStatic.length === 0 && wpCol.filteredAnimated.length === 0
+                text: "No wallpapers match \"" + wpCol.filterText + "\""
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 12
+            }
 
             Column {
-                visible: wpCol.staticImages.length > 0
+                visible: wpCol.filteredStatic.length > 0
                 width: wpCol.width
                 spacing: 8
 
@@ -768,12 +1329,15 @@ Rectangle {
                     spacing: 8
 
                     Repeater {
-                        model: wpCol.staticImages
+                        model: wpCol.filteredStatic
                         delegate: Rectangle {
                             id: staticTile
                             property string path: modelData
-                            width: 92
-                            height: 92
+                            // 2 per row rather than the old fixed 92px (3
+                            // cramped columns) — bigger previews are the
+                            // whole point of a wallpaper picker.
+                            width: (wpCol.width - 8) / 2
+                            height: width
                             color: Theme.bgAlt
                             border.width: wpCol.current === path ? 2 : 1
                             border.color: wpCol.current === path ? Theme.accent : Theme.borderDim
@@ -805,7 +1369,7 @@ Rectangle {
             }
 
             Column {
-                visible: wpCol.animatedImages.length > 0
+                visible: wpCol.filteredAnimated.length > 0
                 width: wpCol.width
                 spacing: 8
 
@@ -822,28 +1386,55 @@ Rectangle {
                     spacing: 8
 
                     Repeater {
-                        model: wpCol.animatedImages
+                        model: wpCol.filteredAnimated
                         delegate: Rectangle {
                             id: animTile
                             property string path: modelData
                             property string fileName: path.split("/").pop()
-                            width: 92
-                            height: 92
+                            property string thumb: wpCol.thumbMap[path] || ""
+                            width: (wpCol.width - 8) / 2
+                            height: width
                             color: Theme.bgAlt
                             border.width: wpCol.current === path ? 2 : 1
                             border.color: wpCol.current === path ? Theme.accent : Theme.borderDim
 
                             HoverHandler { id: animHover }
 
-                            // No live thumbnail for video files — a play
-                            // glyph + filename instead of the expense/
-                            // complexity of extracting a preview frame.
+                            // Real first-frame preview once wallpaper-thumbs
+                            // has generated one (see wpCol.thumbMap above);
+                            // falls back to a play glyph + filename until
+                            // then, or if ffmpeg couldn't read that file.
+                            Image {
+                                id: animThumb
+                                anchors.fill: parent
+                                anchors.margins: 2
+                                source: animTile.thumb.length > 0 ? ("file://" + animTile.thumb) : ""
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                clip: true
+                                visible: status === Image.Ready
+                            }
                             Text {
+                                visible: !animThumb.visible
                                 anchors.centerIn: parent
                                 text: "▶"
                                 color: Theme.fgDim
                                 font.pixelSize: 22
                                 anchors.verticalCenterOffset: -10
+                            }
+                            // Small corner badge marking it as a video even
+                            // once a real thumbnail is showing — otherwise
+                            // it'd be indistinguishable from a static image.
+                            Text {
+                                visible: animThumb.visible
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.margins: 4
+                                text: "▶"
+                                color: Theme.fg
+                                font.pixelSize: 12
+                                style: Text.Outline
+                                styleColor: Theme.bg
                             }
                             Text {
                                 anchors.bottom: parent.bottom
@@ -854,10 +1445,12 @@ Rectangle {
                                 anchors.rightMargin: 4
                                 horizontalAlignment: Text.AlignHCenter
                                 text: fileName
-                                color: Theme.fgDim
+                                color: animThumb.visible ? Theme.fg : Theme.fgDim
                                 font.family: "JetBrainsMono Nerd Font"
                                 font.pixelSize: 9
                                 elide: Text.ElideMiddle
+                                style: animThumb.visible ? Text.Outline : Text.Normal
+                                styleColor: Theme.bg
                             }
 
                             MouseArea {
@@ -877,13 +1470,14 @@ Rectangle {
         }
     }
 
-    // --- Booru (Danbooru only for now — Gelbooru's API needs an account
-    // API key which hasn't been set up) ------------------------------------
-    // Defaults to safe content (rating:general appended to the tag query);
-    // the Lewds toggle removes that restriction. Clicking a result opens a
-    // bigger preview rather than downloading immediately — Download is an
-    // explicit separate action, and "Set as Wallpaper" only appears once
-    // the file actually exists locally.
+    // --- Booru (Danbooru, e621, Yande.re, Konachan — Gelbooru/Rule34.xxx
+    // need a registered account + API key, skipped for that reason) -------
+    // Defaults to Safe content rating; the Content rating tiers (Safe/
+    // Moderate/Explicit) control how far that's relaxed. Clicking a result
+    // opens a bigger preview rather than downloading immediately —
+    // Download is an explicit separate action (saves to downloadsDir, not
+    // the Wallpapers folder), and "Set as Wallpaper" only appears once the
+    // file actually exists locally.
     Component {
         id: booruPanel
         Column {
@@ -897,12 +1491,21 @@ Rectangle {
             // its own small state file instead, same as wpSettings above.
             Item {
                 id: booruSettings
-                property string lewds: "0"
+                // "safe" | "moderate" | "explicit" — moderate excludes only
+                // explicit-rated posts (allows questionable through),
+                // replacing the old binary lewds on/off which couldn't
+                // express that middle ground at all.
+                property string rating: "safe"
                 property string source: "danbooru"
+                // "newest" (site default/no tag) | "score" | "random"
+                property string sortOrder: "newest"
                 property string stateFile: Quickshell.stateDir + "/booru-settings.json"
 
                 function save() {
-                    var json = JSON.stringify({ lewds: booruSettings.lewds, source: booruSettings.source });
+                    var json = JSON.stringify({
+                        rating: booruSettings.rating, source: booruSettings.source,
+                        sortOrder: booruSettings.sortOrder
+                    });
                     booruSaveProc.command = ["sh", "-c",
                         "mkdir -p \"$(dirname \"$2\")\" && printf '%s' \"$1\" > \"$2\"",
                         "--", json, booruSettings.stateFile];
@@ -917,15 +1520,36 @@ Rectangle {
                         onStreamFinished: {
                             try {
                                 var d = JSON.parse(text);
-                                if (d.lewds) booruSettings.lewds = d.lewds;
+                                // Migrate the old binary lewds flag for
+                                // anyone whose state file predates the
+                                // rating tiers — 1 mapped to "no filter at
+                                // all" (explicit), 0 to the old default
+                                // (safe), same behavior as before just
+                                // expressed in the new setting.
+                                if (d.rating) booruSettings.rating = d.rating;
+                                else if (d.lewds !== undefined) booruSettings.rating = d.lewds === "1" ? "explicit" : "safe";
                                 if (d.source) booruSettings.source = d.source;
+                                if (d.sortOrder) booruSettings.sortOrder = d.sortOrder;
+                                // This load is async (cat running as a
+                                // subprocess) while booruCol.doSearch() in
+                                // Component.onCompleted below runs
+                                // synchronously right on startup — that first
+                                // search always fires before this file finishes
+                                // loading, using the hardcoded defaults
+                                // (Danbooru/Safe/Newest) rather than whatever
+                                // was actually saved. Re-run it now that the
+                                // real settings are in, or the panel opens
+                                // showing the wrong source/rating/sort with no
+                                // indication anything's off — as seen live: a
+                                // "of 548508" Danbooru page count left over
+                                // and displayed under a Konachan-labeled grid.
+                                booruCol.doSearch();
                             } catch (e) { /* no state file yet — defaults stand */ }
                         }
                     }
                 }
                 Component.onCompleted: booruLoadProc.running = true
             }
-            readonly property bool lewds: booruSettings.lewds === "1"
 
             // -- Multi-source support --
             // Gelbooru and Rule34.xxx both now require a registered
@@ -933,11 +1557,31 @@ Rectangle {
             // both return an auth error with no key) — skipped for that
             // reason, same call as Gelbooru earlier. These four don't
             // need any key.
+            //
+            // ratingTags: verified live against each API — Danbooru and
+            // Yande.re/Konachan (moebooru) write rating tags as full words
+            // (rating:general/explicit), e621 uses single-letter codes
+            // (rating:s/e) even though the query GRAMMAR is otherwise the
+            // same "order:"/"-tag" syntax across all four (also verified
+            // live: `tags=order:score` and `tags=-rating:e` both work
+            // identically on Danbooru, e621, and moebooru sites).
             readonly property var sources: ({
-                danbooru: { label: "Danbooru", safeTag: "rating:general", hasCount: true, hasAutocomplete: true },
-                e621: { label: "e621", safeTag: "rating:s", hasCount: false, hasAutocomplete: false },
-                yandere: { label: "Yande.re", safeTag: "rating:safe", hasCount: false, hasAutocomplete: false },
-                konachan: { label: "Konachan", safeTag: "rating:safe", hasCount: false, hasAutocomplete: false }
+                danbooru: {
+                    label: "Danbooru", hasCount: true, hasAutocomplete: true,
+                    ratingTags: { safe: "rating:general", moderate: "-rating:explicit", explicit: "" }
+                },
+                e621: {
+                    label: "e621", hasCount: false, hasAutocomplete: false,
+                    ratingTags: { safe: "rating:s", moderate: "-rating:e", explicit: "" }
+                },
+                yandere: {
+                    label: "Yande.re", hasCount: false, hasAutocomplete: false,
+                    ratingTags: { safe: "rating:safe", moderate: "-rating:explicit", explicit: "" }
+                },
+                konachan: {
+                    label: "Konachan", hasCount: false, hasAutocomplete: false,
+                    ratingTags: { safe: "rating:safe", moderate: "-rating:explicit", explicit: "" }
+                }
             })
             readonly property var sourceNames: ["danbooru", "e621", "yandere", "konachan"]
             readonly property string userAgent: "QuickshellBooruPanel/1.0 (by nexoniarz)"
@@ -1019,8 +1663,13 @@ Rectangle {
             // probably a next page; Danbooru doesn't expose a total count
             // on this endpoint, so "did we get a full page" is the signal.
             property bool hasNextPage: false
-            // $HOME/Wallpapers, same folder the Wallpapers panel reads from
-            // — a downloaded post shows up there automatically.
+            // Downloads land here, NOT directly in Wallpapers — previously
+            // every single Download (even ones never actually set as
+            // wallpaper) wrote straight into ~/Wallpapers, silently
+            // cluttering that picker's grid. "Set as Wallpaper" now copies
+            // from here into wallpapersDir explicitly, so only images the
+            // user actually chose show up there.
+            property string downloadsDir: Quickshell.env("HOME") + "/Booru"
             property string wallpapersDir: Quickshell.env("HOME") + "/Wallpapers"
             // cdn.donmai.us returns 403 to QML's Image networking (its
             // default request looks bot-like to whatever's fronting the
@@ -1033,13 +1682,20 @@ Rectangle {
             // page of results never grows the flyout past the bottom of
             // the screen (that was cutting images off entirely rather than
             // just needing a scrollbar, since the popup has no scroll area).
-            readonly property int columns: 3
-            readonly property int tileSlot: 100 // 92px tile + 8px spacing
+            // 2 columns (was 3, at a cramped fixed 92px) — bigger tiles,
+            // sized off the panel's real width instead of a hardcoded pixel
+            // value.
+            readonly property int columns: 2
+            readonly property real tileSize: (booruCol.width - 8) / 2
+            readonly property real tileSlot: booruCol.tileSize + 8
             property int visibleRows: {
                 var screenH = (root.screen && root.screen.height) ? root.screen.height : 1080;
                 // Reserve space for the taskbar, the flyout header, the
-                // search/lewds/source rows above the grid, and margins.
-                var reserved = 340;
+                // search/rating/sort/source rows above the grid, and
+                // margins — bumped from 340 when the old single-row Lewds
+                // toggle became two full rating+sort rows with their own
+                // labels.
+                var reserved = 400;
                 return Math.max(2, Math.floor((screenH - reserved) / booruCol.tileSlot));
             }
             property int pageSize: booruCol.columns * booruCol.visibleRows
@@ -1052,7 +1708,21 @@ Rectangle {
                 var tagParts = booruCol.query.trim().length > 0
                     ? booruCol.query.trim().split(/\s+/).map(encodeURIComponent)
                     : [];
-                if (!booruCol.lewds) tagParts.push(booruCol.sources[booruSettings.source].safeTag);
+                var ratingTag = booruCol.sources[booruSettings.source].ratingTags[booruSettings.rating];
+                if (ratingTag) tagParts.push(ratingTag);
+                // order: is a tag, not a URL param, on all four sources
+                // (verified live — a plain ?order= query param is silently
+                // ignored on the moebooru sites). Danbooru is the one
+                // exception: `order:random` as a TAG reliably times out
+                // server-side even scoped to a single rating tag (verified
+                // live — "ActiveRecord::QueryCanceled, database timed
+                // out"), which read as "Random doesn't work, only Score
+                // does" from the UI (empty results). Danbooru has a
+                // separate, fast `random=true` URL param specifically to
+                // avoid this — handled in fetchPage() instead, so it's
+                // deliberately skipped here for danbooru.
+                if (booruSettings.sortOrder === "score") tagParts.push("order:score");
+                else if (booruSettings.sortOrder === "random" && booruSettings.source !== "danbooru") tagParts.push("order:random");
                 return tagParts.join("+");
             }
 
@@ -1132,6 +1802,12 @@ Rectangle {
                 switch (booruSettings.source) {
                 case "danbooru":
                     url = "https://danbooru.donmai.us/posts.json?limit=" + booruCol.pageSize + "&page=" + booruCol.page + tagsQuery;
+                    // Fast path around the order:random timeout (see
+                    // buildTagsParam) — Danbooru's own random=true redirects
+                    // to a URL with real random ordering baked in, which is
+                    // cheap; page doesn't really apply to "a random
+                    // sample," so it's left out for this one request.
+                    if (booruSettings.sortOrder === "random") url = "https://danbooru.donmai.us/posts.json?limit=" + booruCol.pageSize + "&random=true" + tagsQuery;
                     break;
                 case "e621":
                     url = "https://e621.net/posts.json?limit=" + booruCol.pageSize + "&page=" + booruCol.page + tagsQuery;
@@ -1144,13 +1820,16 @@ Rectangle {
                     break;
                 }
                 searchProc.requestedSource = booruSettings.source;
-                searchProc.command = ["curl", "-s", "-A", booruCol.userAgent, url];
+                // -L: danbooru's random=true responds with a redirect —
+                // without following it, that request comes back as an
+                // empty body (verified live).
+                searchProc.command = ["curl", "-s", "-L", "-A", booruCol.userAgent, url];
                 booruCol.searching = true;
                 booruCol.results = [];
                 searchProc.running = true;
             }
 
-            Process { id: mkdirProc; command: ["mkdir", "-p", booruCol.cacheDir] }
+            Process { id: mkdirProc; command: ["mkdir", "-p", booruCol.cacheDir, booruCol.downloadsDir] }
             Component.onCompleted: {
                 mkdirProc.running = true;
                 booruCol.doSearch();
@@ -1253,7 +1932,12 @@ Rectangle {
                 }
             }
 
-            Process { id: setWpProc; command: [] }
+            property bool wallpaperSetDone: false
+            Process {
+                id: setWpProc
+                command: []
+                onExited: (code) => { if (code === 0) booruCol.wallpaperSetDone = true; }
+            }
 
             // -- Search bar --
             Row {
@@ -1350,40 +2034,102 @@ Rectangle {
                 }
             }
 
+            // Replaces the old binary Lewds on/off — "moderate" lets
+            // questionable-rated posts through while still excluding
+            // explicit, a middle ground the old toggle couldn't express.
+            Text {
+                text: "Content rating"
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 9
+                font.bold: true
+            }
             Row {
-                spacing: 8
-                Rectangle {
-                    width: 80
-                    height: 26
-                    color: booruCol.lewds ? Theme.danger : (lewdMa.containsMouse ? Theme.bgAlt : "transparent")
-                    border.width: 1
-                    border.color: Theme.danger
-                    Text {
-                        anchors.centerIn: parent
-                        text: booruCol.lewds ? "Lewds: ON" : "Lewds"
-                        color: booruCol.lewds ? Theme.bg : Theme.danger
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: 11
-                        font.bold: true
+                spacing: 6
+                Repeater {
+                    model: [
+                        { v: "safe", label: "Safe" },
+                        { v: "moderate", label: "Moderate" },
+                        { v: "explicit", label: "Explicit" }
+                    ]
+                    delegate: Rectangle {
+                        property string rv: modelData.v
+                        readonly property bool active: booruSettings.rating === rv
+                        width: (booruCol.width - 12) / 3; height: 26
+                        color: active ? (rv === "explicit" ? Theme.danger : Theme.accent) : (ratingMa.containsMouse ? Theme.bgAlt : "transparent")
+                        border.width: 1
+                        border.color: active ? (rv === "explicit" ? Theme.danger : Theme.accent) : Theme.border
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: active ? Theme.bg : Theme.fg
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 10
+                            font.bold: true
+                        }
+                        MouseArea {
+                            id: ratingMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (booruSettings.rating === rv) return;
+                                // save() here, not just the property
+                                // assignment: this rating setting not
+                                // sticking on its own (only saving as a
+                                // side effect of also switching source
+                                // afterward) was a real persistence bug on
+                                // the old Lewds toggle — keep saving
+                                // explicitly so it can't regress the same way.
+                                booruSettings.rating = rv;
+                                booruSettings.save();
+                                booruCol.doSearch();
+                            }
+                        }
                     }
-                    MouseArea {
-                        id: lewdMa
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            // save() here, not just the property assignment:
-                            // this was the actual persistence bug — toggling
-                            // Lewds never wrote to disk on its own, only the
-                            // source-switcher below called save(). So Lewds
-                            // only ever "stuck" as a side effect of also
-                            // switching source afterward, and turning it
-                            // back off never stuck at all — reopening Booru
-                            // always reloaded whatever was last written that
-                            // way instead of the toggle's actual state.
-                            booruSettings.lewds = booruCol.lewds ? "0" : "1";
-                            booruSettings.save();
-                            booruCol.doSearch();
+                }
+            }
+
+            Text {
+                text: "Sort"
+                color: Theme.fgDim
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: 9
+                font.bold: true
+            }
+            Row {
+                spacing: 6
+                Repeater {
+                    model: [
+                        { v: "newest", label: "Newest" },
+                        { v: "score", label: "Score" },
+                        { v: "random", label: "Random" }
+                    ]
+                    delegate: Rectangle {
+                        property string sv: modelData.v
+                        readonly property bool active: booruSettings.sortOrder === sv
+                        width: (booruCol.width - 12) / 3; height: 26
+                        color: active ? Theme.accent : (sortMa.containsMouse ? Theme.bgAlt : "transparent")
+                        border.width: 1
+                        border.color: active ? Theme.accent : Theme.border
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: active ? Theme.bg : Theme.fg
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 10
+                        }
+                        MouseArea {
+                            id: sortMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (booruSettings.sortOrder === sv) return;
+                                booruSettings.sortOrder = sv;
+                                booruSettings.save();
+                                booruCol.doSearch();
+                            }
                         }
                     }
                 }
@@ -1456,8 +2202,8 @@ Rectangle {
                             model: booruCol.results
                             delegate: Rectangle {
                                 property var post: modelData
-                                width: 92
-                                height: 92
+                                width: booruCol.tileSize
+                                height: booruCol.tileSize
                                 color: Theme.bgAlt
                                 border.width: 1
                                 border.color: (post.rating === "e" || post.rating === "q") ? Theme.danger : Theme.borderDim
@@ -1476,6 +2222,7 @@ Rectangle {
                                     onClicked: {
                                         booruCol.selected = post;
                                         booruCol.downloadedPath = "";
+                                        booruCol.wallpaperSetDone = false;
                                         booruCol.previewReady = false;
                                         var ext = (post.fileExt || "jpg").toLowerCase();
                                         // Image can't decode video files (largeUrl for a
@@ -1508,7 +2255,12 @@ Rectangle {
                     // off the visible screen. Flow wraps overflow onto a
                     // second line instead of spilling past the edge.
                     Flow {
-                        visible: !booruCol.searching && (booruCol.page > 1 || booruCol.hasNextPage)
+                        // Danbooru's random=true (see fetchPage) is a fresh
+                        // random sample every request, not a real page
+                        // sequence — no &page= param is even sent for it, so
+                        // "Page N"/Next wouldn't actually mean anything there.
+                        readonly property bool isDanbooruRandom: booruSettings.source === "danbooru" && booruSettings.sortOrder === "random"
+                        visible: !booruCol.searching && !isDanbooruRandom && (booruCol.page > 1 || booruCol.hasNextPage)
                         width: booruCol.width
                         spacing: 8
                         Rectangle {
@@ -1536,15 +2288,27 @@ Rectangle {
                                 }
                             }
                         }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "Page"
-                            color: Theme.fgDim
-                            font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: 11
+                        // Flow does NOT support anchors on its direct children —
+                        // Qt silently disables the ENTIRE Flow's layout the
+                        // moment it sees one ("Flow will not function", logged
+                        // as a warning), collapsing/overlapping every control
+                        // in it. This is why pagination looked broken/missing:
+                        // the three anchored items below were direct Flow
+                        // children. Fix: push the anchor one level down into a
+                        // plain Item wrapper, which Flow lays out normally.
+                        Item {
+                            width: pageLabelText.implicitWidth
+                            height: 26
+                            Text {
+                                id: pageLabelText
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "Page"
+                                color: Theme.fgDim
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 11
+                            }
                         }
                         Rectangle {
-                            anchors.verticalCenter: parent.verticalCenter
                             width: 40; height: 26
                             color: Theme.bgAlt
                             border.width: 1
@@ -1567,12 +2331,18 @@ Rectangle {
                                 }
                             }
                         }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: booruCol.totalPages > 0 ? ("of " + booruCol.totalPages) : ""
-                            color: Theme.fgDim
-                            font.family: "JetBrainsMono Nerd Font"
-                            font.pixelSize: 11
+                        Item {
+                            visible: booruCol.totalPages > 0
+                            width: ofPagesText.implicitWidth
+                            height: 26
+                            Text {
+                                id: ofPagesText
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: booruCol.totalPages > 0 ? ("of " + booruCol.totalPages) : ""
+                                color: Theme.fgDim
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 11
+                            }
                         }
                         Rectangle {
                             width: 70; height: 26
@@ -1708,7 +2478,7 @@ Rectangle {
                                 if (booruCol.downloading || booruCol.downloadedPath !== "" || !booruCol.selected) return;
                                 var post = booruCol.selected;
                                 var ext = post.fileExt || "jpg";
-                                var target = booruCol.wallpapersDir + "/" + booruSettings.source + "_" + post.id + "." + ext;
+                                var target = booruCol.downloadsDir + "/" + booruSettings.source + "_" + post.id + "." + ext;
                                 booruCol.downloadTarget = target;
                                 downloadProc.command = ["curl", "-sL", post.fileUrl, "-o", target];
                                 booruCol.downloading = true;
@@ -1726,8 +2496,8 @@ Rectangle {
                         border.color: Theme.border
                         Text {
                             anchors.centerIn: parent
-                            text: "Set as Wallpaper"
-                            color: Theme.fg
+                            text: booruCol.wallpaperSetDone ? "Wallpaper set!" : "Set as Wallpaper"
+                            color: booruCol.wallpaperSetDone ? Theme.accent : Theme.fg
                             font.family: "JetBrainsMono Nerd Font"
                             font.pixelSize: 12
                         }
@@ -1737,7 +2507,17 @@ Rectangle {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                setWpProc.command = ["wallpaper-set", booruCol.downloadedPath];
+                                if (!booruCol.selected) return;
+                                var post = booruCol.selected;
+                                var ext = post.fileExt || "jpg";
+                                // Downloaded files live in downloadsDir now, not
+                                // wallpapersDir directly (see downloadsDir
+                                // comment above) — copy into wallpapersDir only
+                                // on this explicit action, then apply it.
+                                var wpTarget = booruCol.wallpapersDir + "/" + booruSettings.source + "_" + post.id + "." + ext;
+                                setWpProc.command = ["sh", "-c",
+                                    'cp "$1" "$2" && wallpaper-set "$2"',
+                                    "--", booruCol.downloadedPath, wpTarget];
                                 setWpProc.running = true;
                             }
                         }

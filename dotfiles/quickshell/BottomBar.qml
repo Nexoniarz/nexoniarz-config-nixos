@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Widgets
 
@@ -168,6 +169,100 @@ PanelWindow {
         color: Theme.border
     }
 
+    // --- Weather badge ---------------------------------------------------
+    // Independent of RightFlyout's own weatherPanel (which only exists
+    // while the Loader has it active) — this needs to keep showing a
+    // temperature even when the panel's closed, so it fetches on its own
+    // timer rather than reading state from a panel instance that mostly
+    // doesn't exist. Reads the same city override (if any) so the badge
+    // and the full panel never disagree about which location they're
+    // showing.
+    Item {
+        id: wxBadgeState
+        property var data: ({})
+        property bool haveData: !!data.current
+        property string city: ""
+
+        function describeIcon(code) {
+            if (code === 0) return "☀";
+            if (code === 1) return "🌤";
+            if (code === 2) return "⛅";
+            if (code === 3) return "☁";
+            if (code === 45 || code === 48) return "🌫";
+            if (code >= 51 && code <= 57) return "🌦";
+            if (code >= 61 && code <= 67) return "🌧";
+            if (code >= 71 && code <= 77) return "❄";
+            if (code >= 80 && code <= 82) return "🌧";
+            if (code === 85 || code === 86) return "🌨";
+            if (code >= 95) return "⛈";
+            return "?";
+        }
+
+        Process {
+            id: wxBadgeCityLoadProc
+            command: ["cat", Quickshell.stateDir + "/weather-settings.json"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try {
+                        var d = JSON.parse(text);
+                        if (d.city) wxBadgeState.city = d.city;
+                    } catch (e) { /* no override saved — auto-detect stands */ }
+                    wxBadgeFetchProc.command = wxBadgeState.city.length > 0
+                        ? ["weather-fetch", wxBadgeState.city] : ["weather-fetch"];
+                    wxBadgeFetchProc.running = true;
+                }
+            }
+        }
+        Process {
+            id: wxBadgeFetchProc
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try { wxBadgeState.data = JSON.parse(text); } catch (e) { /* keep last good reading */ }
+                }
+            }
+        }
+        Timer {
+            interval: 900000
+            running: true
+            repeat: true
+            onTriggered: wxBadgeCityLoadProc.running = true
+        }
+        Component.onCompleted: wxBadgeCityLoadProc.running = true
+    }
+
+    Rectangle {
+        id: weatherBadge
+        visible: wxBadgeState.haveData
+        anchors.right: rightToggle.left
+        anchors.rightMargin: 8
+        anchors.verticalCenter: parent.verticalCenter
+        width: wxBadgeLabel.implicitWidth + 16
+        height: 32
+        color: wxBadgeMa.containsMouse ? Theme.bgAlt : "transparent"
+        border.width: 1
+        border.color: Theme.border
+        Text {
+            id: wxBadgeLabel
+            anchors.centerIn: parent
+            text: wxBadgeState.haveData
+                ? (wxBadgeState.describeIcon(wxBadgeState.data.current.weather_code) + " " + Math.round(wxBadgeState.data.current.temperature_2m) + "°C")
+                : ""
+            color: Theme.fg
+            font.family: "JetBrainsMono Nerd Font"
+            font.pixelSize: 12
+        }
+        MouseArea {
+            id: wxBadgeMa
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                root.rightBar.expanded = true;
+                root.rightBar.toggle("weather");
+            }
+        }
+    }
+
     // --- Right bar toggle ---------------------------------------------
     Rectangle {
         id: rightToggle
@@ -202,7 +297,7 @@ PanelWindow {
     Row {
         anchors.left: parent.left
         anchors.leftMargin: 8 + 32 + 8 + (root.workspacePills.length * 36) + 16
-        anchors.right: rightToggle.left
+        anchors.right: weatherBadge.left
         anchors.rightMargin: 8
         anchors.verticalCenter: parent.verticalCenter
         spacing: 4
