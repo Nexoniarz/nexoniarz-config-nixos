@@ -25,7 +25,15 @@ touch "$conf"
 
 line="monitor = $descriptor"
 if grep -q "^monitor = $mon," "$conf" 2>/dev/null; then
-    tmp=$(mktemp)
+    # mktemp in the same directory as $conf, not the default /tmp: /tmp is
+    # a different filesystem here, which makes `mv` below a non-atomic
+    # copy+unlink instead of a rename — Hyprland's file watcher (it
+    # watches every `source=`d file, including this one) could catch the
+    # destination mid-replace and its `source=` glob would find nothing,
+    # throwing "globbing error: found no match" (observed live after an
+    # orientation change, which always hits this branch since DP-1
+    # already has an existing line by then).
+    tmp=$(mktemp "$conf.XXXXXX")
     awk -v prefix="monitor = $mon," -v newline="$line" '
         index($0, prefix) == 1 { print newline; next } { print }
     ' "$conf" > "$tmp"

@@ -104,6 +104,11 @@ Item {
             theme.dark ? "1" : "0"];
         gtkSyncProc.running = true;
 
+        qtSyncProc.command = ["qt-theme-set",
+            theme.accent, theme.bg, theme.bgAlt, theme.fg, theme.fgDim, theme.border,
+            theme.dark ? "1" : "0"];
+        qtSyncProc.running = true;
+
         kittySyncProc.command = ["kitty-theme-set",
             theme.accent, theme.bg, theme.bgAlt, theme.fg, theme.fgDim, theme.border];
         kittySyncProc.running = true;
@@ -117,6 +122,7 @@ Item {
     Process { id: saveProc }
     Process { id: hyprSyncProc }
     Process { id: gtkSyncProc }
+    Process { id: qtSyncProc }
     Process { id: kittySyncProc }
     Process { id: rofiSyncProc }
     Process {

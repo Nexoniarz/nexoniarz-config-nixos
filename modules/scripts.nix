@@ -12,6 +12,7 @@ let
   displaySet = pkgs.writeShellScriptBin "display-set" (builtins.readFile ./scripts/display-set.sh);
   hyprThemeSet = pkgs.writeShellScriptBin "hypr-theme-set" (builtins.readFile ./scripts/hypr-theme-set.sh);
   gtkThemeSet = pkgs.writeShellScriptBin "gtk-theme-set" (builtins.readFile ./scripts/gtk-theme-set.sh);
+  qtThemeSet = pkgs.writeShellScriptBin "qt-theme-set" (builtins.readFile ./scripts/qt-theme-set.sh);
   kittyThemeSet = pkgs.writeShellScriptBin "kitty-theme-set" (builtins.readFile ./scripts/kitty-theme-set.sh);
   rofiThemeSet = pkgs.writeShellScriptBin "rofi-theme-set" (builtins.readFile ./scripts/rofi-theme-set.sh);
   listCursorThemes = pkgs.writeShellScriptBin "list-cursor-themes" (builtins.readFile ./scripts/list-cursor-themes.sh);
@@ -36,6 +37,7 @@ in
     displaySet
     hyprThemeSet
     gtkThemeSet
+    qtThemeSet
     kittyThemeSet
     rofiThemeSet
     listCursorThemes

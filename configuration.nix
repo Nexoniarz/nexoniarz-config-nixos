@@ -12,6 +12,7 @@
     ./modules/users.nix            # User accounts and global configurations
     ./modules/apps.nix             # All installed packages: apps, CLI tools, dev toolchains
     ./modules/scripts.nix          # Custom system scripts and helpers
+    ./modules/default-apps.nix     # Default app associations (terminal, image viewer, archives), LibreOffice
   ];
 
   # Do not change this value. Read documentation before updating.

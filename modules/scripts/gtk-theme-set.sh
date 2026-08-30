@@ -117,3 +117,16 @@ if command -v dconf >/dev/null 2>&1; then
     dconf write /org/gnome/desktop/interface/icon-theme "'$icon_theme'"
     dconf write /org/gnome/desktop/interface/color-scheme "'$color_scheme'"
 fi
+
+# GTK2 compat: separate config format (~/.gtkrc-2.0, not settings.ini),
+# and no live theme-switching mechanism at all — GTK2 apps only read this
+# at their own startup. Only icon theme and font actually follow the
+# current theme; gnome-themes-extra's bundled GTK2 Adwaita engine has no
+# dark variant to switch to (GTK2 predates that concept), so gtk-theme-
+# name here is always the one real option, not a broken attempt at dark
+# mode.
+cat > "$HOME/.gtkrc-2.0" <<EOF
+gtk-theme-name="Adwaita"
+gtk-icon-theme-name="$icon_theme"
+gtk-font-name="Noto Sans 10"
+EOF
