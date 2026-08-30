@@ -58,3 +58,12 @@ case "${image,,}" in
         hyprctl hyprpaper wallpaper ",$image,$fit_mode" > /dev/null
         ;;
 esac
+
+# Persist so the wallpaper survives a reboot/relogin. hyprpaper/mpvpaper
+# both start every session with nothing loaded — this was previously only
+# ever set at runtime via IPC, so the desktop silently reverted to blank
+# every fresh login. wallpaper-restore (exec-once in hyprland.conf, after
+# hyprpaper starts) re-runs the exact command saved here.
+state_file="$HOME/.config/hypr/wallpaper.conf"
+mkdir -p "$(dirname "$state_file")"
+printf 'wallpaper-set %q %q %q %q %q\n' "$image" "$fit_mode" "$muted" "$speed" "$auto_pause" > "$state_file"

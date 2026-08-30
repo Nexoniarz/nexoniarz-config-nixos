@@ -1100,6 +1100,16 @@ Rectangle {
                 }
                 var url = "https://danbooru.donmai.us/autocomplete.json?search%5Bquery%5D="
                     + encodeURIComponent(partial) + "&search%5Btype%5D=tag_query&limit=8";
+                // If a previous keystroke's request is still in flight (curl
+                // hasn't returned yet), reassigning .command and setting
+                // .running = true on an already-running Process is a no-op
+                // — running:true -> true is not a change, so nothing
+                // restarts and the newer query silently never gets sent.
+                // That's the "sometimes works, sometimes not" flakiness:
+                // explicitly stop it first so the new request actually
+                // fires.
+                if (autocompleteProc.running) autocompleteProc.running = false;
+                autocompleteProc.requestedPartial = partial;
                 autocompleteProc.command = ["curl", "-s", "-A", booruCol.userAgent, url];
                 autocompleteProc.running = true;
             }
@@ -1211,8 +1221,15 @@ Rectangle {
             }
             Process {
                 id: autocompleteProc
+                property string requestedPartial: ""
                 stdout: StdioCollector {
                     onStreamFinished: {
+                        // Drop stale responses: even with the running-guard
+                        // above, a slow request can still resolve after a
+                        // faster, newer one — without this check whichever
+                        // curl happens to finish last wins, regardless of
+                        // which one actually matches what's typed now.
+                        if (autocompleteProc.requestedPartial !== booruCol.currentPartialTag()) return;
                         try {
                             var d = JSON.parse(text);
                             booruCol.suggestions = Array.isArray(d) ? d : [];
@@ -1354,7 +1371,20 @@ Rectangle {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: { booruSettings.lewds = booruCol.lewds ? "0" : "1"; booruCol.doSearch(); }
+                        onClicked: {
+                            // save() here, not just the property assignment:
+                            // this was the actual persistence bug — toggling
+                            // Lewds never wrote to disk on its own, only the
+                            // source-switcher below called save(). So Lewds
+                            // only ever "stuck" as a side effect of also
+                            // switching source afterward, and turning it
+                            // back off never stuck at all — reopening Booru
+                            // always reloaded whatever was last written that
+                            // way instead of the toggle's actual state.
+                            booruSettings.lewds = booruCol.lewds ? "0" : "1";
+                            booruSettings.save();
+                            booruCol.doSearch();
+                        }
                     }
                 }
             }
@@ -1468,7 +1498,16 @@ Rectangle {
                     }
 
                     // -- Pagination --
-                    Row {
+                    // Flow, not Row: Row lays out children at their natural
+                    // width regardless of the width assigned to the Row
+                    // itself, so when Prev + "Page" + the page field + "of
+                    // N" + Next added up to more than booruCol.width (which
+                    // happened often enough — "of N" varies in width with
+                    // page count, and it was already close to the edge) the
+                    // Next button rendered past the flyout's right edge,
+                    // off the visible screen. Flow wraps overflow onto a
+                    // second line instead of spilling past the edge.
+                    Flow {
                         visible: !booruCol.searching && (booruCol.page > 1 || booruCol.hasNextPage)
                         width: booruCol.width
                         spacing: 8

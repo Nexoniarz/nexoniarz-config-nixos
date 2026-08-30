@@ -76,7 +76,19 @@ PanelWindow {
                 delegate: IconImage {
                     id: trayIcon
                     implicitSize: 18
-                    source: Quickshell.iconPath(modelData.icon, "")
+                    // Only resolve through the icon theme when this is
+                    // actually a themed icon name (e.g. Steam's
+                    // "steam_tray_mono"). Apps that only ever supply a raw
+                    // IconPixmap over the SNI protocol and no IconName at
+                    // all (confirmed via busctl: Vesktop's tray item has no
+                    // IconName property) get an already-usable image:// URL
+                    // back from modelData.icon instead — running that
+                    // through iconPath(), a name/path resolver, mangled it
+                    // into nothing, which is what rendered as a broken-
+                    // texture checkerboard instead of the actual icon.
+                    source: modelData.icon.includes("://")
+                        ? modelData.icon
+                        : Quickshell.iconPath(modelData.icon, "")
                     MouseArea {
                         anchors.fill: parent
                         hoverEnabled: true

@@ -8,6 +8,7 @@ let
   showDesktopToggle = pkgs.writeShellScriptBin "show-desktop-toggle" (builtins.readFile ./scripts/show-desktop-toggle.sh);
   wallpaperSet = pkgs.writeShellScriptBin "wallpaper-set" (builtins.readFile ./scripts/wallpaper-set.sh);
   wallpaperDelete = pkgs.writeShellScriptBin "wallpaper-delete" (builtins.readFile ./scripts/wallpaper-delete.sh);
+  wallpaperRestore = pkgs.writeShellScriptBin "wallpaper-restore" (builtins.readFile ./scripts/wallpaper-restore.sh);
   displaySet = pkgs.writeShellScriptBin "display-set" (builtins.readFile ./scripts/display-set.sh);
   hyprThemeSet = pkgs.writeShellScriptBin "hypr-theme-set" (builtins.readFile ./scripts/hypr-theme-set.sh);
   gtkThemeSet = pkgs.writeShellScriptBin "gtk-theme-set" (builtins.readFile ./scripts/gtk-theme-set.sh);
@@ -31,6 +32,7 @@ in
     showDesktopToggle
     wallpaperSet
     wallpaperDelete
+    wallpaperRestore
     displaySet
     hyprThemeSet
     gtkThemeSet

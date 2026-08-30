@@ -11,7 +11,13 @@
   services.greetd = {
     enable = true;
     settings.default_session = {
-      command = "${pkgs.tuigreet}/bin/tuigreet --time --remember --remember-session --cmd Hyprland";
+      # start-hyprland, not the raw Hyprland binary: it's Hyprland's own
+      # watchdog-wrapped launcher (ships alongside Hyprland in the same
+      # package) that also auto-restarts the compositor if it hangs.
+      # Launching the raw binary directly works but logs a startup warning
+      # ("Hyprland is being launched without start-hyprland. This is highly
+      # advised against.") and skips that recovery.
+      command = "${pkgs.tuigreet}/bin/tuigreet --time --remember --remember-session --cmd start-hyprland";
       user = "greeter";
     };
   };
