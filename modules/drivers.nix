@@ -10,14 +10,9 @@
   #OpenTabletDriver
   hardware.opentabletdriver.enable = true;
   hardware.uinput.enable = true;
-  boot.kernelModules = [ "uinput" "v4l2loopback" ];
+  boot.kernelModules = [ "uinput" ];
 
-  # Virtual webcam device so ffmpeg (fed by the GoPro's stream) can appear
-  # as a normal camera to apps like Discord. exclusive_caps=1 is required
-  # for Chromium/WebRTC-based apps to recognize it as a real capture device.
-  boot.extraModulePackages = [ config.boot.kernelPackages.v4l2loopback ];
   boot.extraModprobeConfig = ''
-    options v4l2loopback devices=1 video_nr=10 card_label="GoPro Webcam" exclusive_caps=1
     # PS4/PS5 controllers (e.g. DualSense) connect over Bluetooth then
     # immediately disconnect — a well-known Linux Bluetooth stack issue
     # where many adapters' Enhanced Retransmission Mode implementation is

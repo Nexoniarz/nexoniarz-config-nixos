@@ -58,6 +58,36 @@
     alsa.enable = true;
     alsa.support32Bit = true;
     pulse.enable = true;
+
+    # Standalone "Virtual Microphone" device, fully independent of the real
+    # hardware mic — always present regardless of what's running, so apps
+    # like Discord keep defaulting to the real mic untouched, and only pick
+    # this up if explicitly selected. Feed anything into "Virtual
+    # Microphone Sink" (e.g. via qpwgraph/helvum, routing EasyEffects' or
+    # Soundux's output to it) and it comes out the other side as "Virtual
+    # Microphone", selectable like any other input device.
+    extraConfig.pipewire."99-virtual-microphone" = {
+      "context.modules" = [
+        {
+          name = "libpipewire-module-loopback";
+          args = {
+            "node.description" = "Virtual Microphone";
+            "capture.props" = {
+              "node.name" = "virtual_mic_sink";
+              "node.description" = "Virtual Microphone Sink";
+              "media.class" = "Audio/Sink";
+              "audio.position" = "FL,FR";
+            };
+            "playback.props" = {
+              "node.name" = "virtual_mic_source";
+              "node.description" = "Virtual Microphone";
+              "media.class" = "Audio/Source";
+              "audio.position" = "FL,FR";
+            };
+          };
+        }
+      ];
+    };
   };
 
   hardware.bluetooth = {
@@ -168,6 +198,15 @@
     "net.ipv6.conf.default.accept_redirects" = false;
     "net.ipv4.conf.all.send_redirects" = false;
     "net.ipv4.conf.default.send_redirects" = false;
+    # Restrict ptrace to a process's own children — blocks a common local
+    # credential-scraping/process-injection vector between unrelated
+    # processes. Only bites ad-hoc `gdb -p <pid>`-style attaches to a
+    # process that isn't your debugger's own child.
+    "kernel.yama.ptrace_scope" = 1;
+    # Drop the kernel-uptime-derived TCP timestamp from outgoing packets
+    # (a passive fingerprinting/uptime-leak vector). Negligible throughput
+    # impact on a normal home connection.
+    "net.ipv4.tcp_timestamps" = 0;
   };
 
   # Crash dumps can contain decrypted memory contents, passwords, keys —
@@ -201,4 +240,16 @@
   networking.networkmanager.wifi.macAddress = "random";
   networking.networkmanager.wifi.scanRandMacAddress = true;
   networking.networkmanager.ethernet.macAddress = "stable";
+
+  # Disable NetworkManager's periodic external connectivity probe (normally
+  # pings a canary URL to detect captive portals) — one less routine
+  # external phone-home, no functional loss on a directly-connected desktop.
+  networking.networkmanager.settings.connectivity = {
+    uri = "";
+    interval = 0;
+  };
+
+  # Budgie's module turns this on by default (for Budgie Control Center's
+  # Location Services panel) — nothing in this config needs location data.
+  services.geoclue2.enable = false;
 }

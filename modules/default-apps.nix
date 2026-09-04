@@ -42,24 +42,19 @@
         "application/x-7z-compressed" "application/vnd.rar" "application/zip"
         "application/x-java-archive" "application/x-arj"
       ];
+      # Taken from Okular's own .desktop file, same as the other two lists.
+      okularMimes = [
+        "application/pdf" "application/x-pdf" "image/vnd.djvu" "application/epub+zip"
+        "application/x-fictionbook+xml" "application/x-mobipocket-ebook"
+        "image/x-portable-document" "application/x-cbr" "application/x-cbz"
+        "application/x-cbt" "application/x-cb7" "application/postscript"
+      ];
       line = desktop: mime: "${mime}=${desktop}";
     in
     ''
       [Default Applications]
       ${lib.concatMapStringsSep "\n" (line "org.kde.gwenview.desktop") gwenviewMimes}
       ${lib.concatMapStringsSep "\n" (line "org.kde.ark.desktop") arkMimes}
+      ${lib.concatMapStringsSep "\n" (line "org.kde.okular.desktop") okularMimes}
     '';
-
-  # Thunar's own "Open Terminal Here" custom action (Edit > Configure
-  # Custom Actions) shipped pointing at `exo-open --launch
-  # TerminalEmulator` — exo isn't installed on this system at all (no
-  # XFCE session, so its helpers.rc mechanism has nothing to resolve
-  # against), so the action silently did nothing. `f`, not `w`: only
-  # creates this baseline for a fresh account — once it exists, further
-  # edits made through Thunar's own UI (adding more custom actions) are
-  # never overwritten by a rebuild.
-  systemd.tmpfiles.rules = [
-    "d /home/nexoniarz/.config/Thunar 0755 nexoniarz users -"
-    ''f /home/nexoniarz/.config/Thunar/uca.xml 0644 nexoniarz users - <?xml version="1.0" encoding="UTF-8"?><actions><action><icon>utilities-terminal</icon><name>Open Terminal Here</name><submenu></submenu><unique-id>1788014825097143-1</unique-id><command>kitty --working-directory %f</command><description>Open a terminal in this folder</description><range></range><patterns>*</patterns><startup-notify/><directories/></action></actions>''
-  ];
 }
