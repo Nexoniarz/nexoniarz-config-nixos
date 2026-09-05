@@ -1,31 +1,44 @@
 { config, lib, pkgs, ... }:
 
 {
-  # Bootloader & Kernel
-  boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
-  boot.loader.systemd-boot.configurationLimit = 5;
+  boot.loader.limine = {
+    enable = true;
+    maxGenerations = 5;
+
+    # Gruvbox, to match the icon theme.
+    style = {
+      wallpapers = [ ];   # Solid background; a path here would be used instead
+      interface = {
+        branding = "NixOS";
+        brandingColor = "fabd2f";
+        helpColor = "928374";
+        helpColorBright = "d79921";
+      };
+      graphicalTerminal = {
+        foreground = "ebdbb2";
+        background = "00282828";
+        brightForeground = "fbf1c7";
+        palette = "282828;cc241d;98971a;d79921;458588;b16286;689d6a;a89984";
+        brightPalette = "928374;fb4934;b8bb26;fabd2f;83a598;d3869b;8ec07c;ebdbb2";
+        margin = 32;
+      };
+    };
+  };
   boot.kernelPackages = pkgs.linuxPackages;
   boot.supportedFilesystems = [ "fuse" ];
 
-  # Networking
   networking.hostName = "nixos";
   networking.networkmanager.enable = true;
 
-  # Firewall Configuration
   networking.firewall = {
     enable = true;
-
-    # Allow local ping diagnostic queries
     allowPing = true;
-
     allowedTCPPortRanges = [ { from = 1714; to = 1764; } ];
     allowedUDPPortRanges = [ { from = 1714; to = 1764; } ];
     allowedTCPPorts = [ 80 443 ];
-    # allowedUDPPorts = [ ];
   };
 
-  # Time zone and Internationalization
   time.timeZone = "Europe/Warsaw";
   i18n.defaultLocale = "pl_PL.UTF-8";
   i18n.extraLocaleSettings = {
@@ -47,10 +60,8 @@
     options = "--delete-older-than 7d";
   };
 
-  # Console keymap
   console.keyMap = "pl2";
 
-  # Sound and Audio (Pipewire)
   security.rtkit.enable = true;
   services.pulseaudio.enable = false;
   services.pipewire = {
@@ -58,36 +69,6 @@
     alsa.enable = true;
     alsa.support32Bit = true;
     pulse.enable = true;
-
-    # Standalone "Virtual Microphone" device, fully independent of the real
-    # hardware mic — always present regardless of what's running, so apps
-    # like Discord keep defaulting to the real mic untouched, and only pick
-    # this up if explicitly selected. Feed anything into "Virtual
-    # Microphone Sink" (e.g. via qpwgraph/helvum, routing EasyEffects' or
-    # Soundux's output to it) and it comes out the other side as "Virtual
-    # Microphone", selectable like any other input device.
-    extraConfig.pipewire."99-virtual-microphone" = {
-      "context.modules" = [
-        {
-          name = "libpipewire-module-loopback";
-          args = {
-            "node.description" = "Virtual Microphone";
-            "capture.props" = {
-              "node.name" = "virtual_mic_sink";
-              "node.description" = "Virtual Microphone Sink";
-              "media.class" = "Audio/Sink";
-              "audio.position" = "FL,FR";
-            };
-            "playback.props" = {
-              "node.name" = "virtual_mic_source";
-              "node.description" = "Virtual Microphone";
-              "media.class" = "Audio/Source";
-              "audio.position" = "FL,FR";
-            };
-          };
-        }
-      ];
-    };
   };
 
   hardware.bluetooth = {
@@ -95,18 +76,10 @@
     powerOnBoot = true;
     settings = {
       General = {
-        # Shows battery charge of connected devices on supported
-        # Bluetooth adapters. Defaults to 'false'.
-        Experimental = true;
-        # When enabled other devices can connect faster to us, however
-        # the tradeoff is increased power consumption. Defaults to
-        # 'false'.
-        FastConnectable = true;
+        Experimental = true;      # Battery level of connected devices
+        FastConnectable = true;   # Faster reconnects, more power draw
       };
       Policy = {
-        # Enable all controllers when they are found. This includes
-        # adapters present on start as well as adapters that are plugged
-        # in later on. Defaults to 'true'.
         AutoEnable = true;
       };
     };
@@ -114,26 +87,22 @@
 
   services.blueman.enable = true;
 
-  #Firejail
   programs.firejail = {
     enable = true;
   };
 
-  #FUSE shit
   programs.fuse.userAllowOther = true;
 
-  # Enable GnuPG Agent with GUI pinentry support
   programs.gnupg.agent = {
     enable = true;
     enableSSHSupport = true;
-    pinentryPackage = pkgs.pinentry-rofi; # Reuses the Rofi theme, no extra toolkit
+    pinentryPackage = pkgs.pinentry-rofi;
   };
 
   security.sudo.extraConfig = ''
     Defaults pwfeedback
   '';
 
-  # Printing services
   services.printing.enable = true;
 
   nixpkgs.config.allowUnfree = true;
@@ -152,8 +121,7 @@
     roboto
   ];
 
-  # --- Loader shim for running non-Nix-packaged binaries (e.g. the official
-  # Tor Browser bundle) that expect a standard FHS dynamic linker/libraries. ---
+  # Lets non-Nix binaries (e.g. the Tor Browser bundle) find an FHS linker.
   programs.nix-ld.enable = true;
   programs.nix-ld.libraries = with pkgs; [
     glib gtk3 gdk-pixbuf pango cairo atk
@@ -165,61 +133,34 @@
   ];
   environment.systemPackages = [ pkgs.file ];
 
-  # --- Hardening: swap, kernel sysctls, DNS, MAC randomization ---
+  # --- Hardening ---
 
-  # Swap: replace disk swap with compressed in-RAM swap. Nothing sensitive
-  # (decrypted vault contents, browser memory, GPG session data) ever gets
-  # written to disk in plaintext via swap. Also faster than disk swap under
-  # memory pressure.
+  # zram instead of disk swap: nothing sensitive is written to disk in
+  # plaintext. systemd's gpt-auto-generator would otherwise re-activate the
+  # old swap partition regardless of swapDevices, hence the kernel param.
   zramSwap.enable = true;
   swapDevices = lib.mkForce [ ];
-  # systemd's gpt-auto-generator independently re-discovers and activates any
-  # GPT partition tagged as Linux swap, regardless of the swapDevices list
-  # above — this disables that auto-discovery so the old disk swap partition
-  # actually stays off. Doesn't affect /, /home, /nix, /boot: those are
-  # already explicitly declared in hardware-configuration.nix, not relying on
-  # gpt-auto. Takes effect on next reboot.
   boot.kernelParams = [ "systemd.gpt_auto=0" ];
 
-  # Kernel/system hardening sysctls
   boot.kernel.sysctl = {
-    # Hide kernel pointers from unprivileged users (blocks a common
-    # local info-leak used in exploit chains).
     "kernel.kptr_restrict" = 2;
-    # Restrict dmesg access to root.
     "kernel.dmesg_restrict" = 1;
-    # Reverse-path filtering: drop packets with spoofed source addresses.
     "net.ipv4.conf.all.rp_filter" = 1;
     "net.ipv4.conf.default.rp_filter" = 1;
-    # Don't accept/send ICMP redirects (blocks a classic local MITM trick).
     "net.ipv4.conf.all.accept_redirects" = false;
     "net.ipv4.conf.default.accept_redirects" = false;
     "net.ipv6.conf.all.accept_redirects" = false;
     "net.ipv6.conf.default.accept_redirects" = false;
     "net.ipv4.conf.all.send_redirects" = false;
     "net.ipv4.conf.default.send_redirects" = false;
-    # Restrict ptrace to a process's own children — blocks a common local
-    # credential-scraping/process-injection vector between unrelated
-    # processes. Only bites ad-hoc `gdb -p <pid>`-style attaches to a
-    # process that isn't your debugger's own child.
+    # Only bites ad-hoc `gdb -p <pid>` on a non-child process.
     "kernel.yama.ptrace_scope" = 1;
-    # Drop the kernel-uptime-derived TCP timestamp from outgoing packets
-    # (a passive fingerprinting/uptime-leak vector). Negligible throughput
-    # impact on a normal home connection.
     "net.ipv4.tcp_timestamps" = 0;
   };
 
-  # Crash dumps can contain decrypted memory contents, passwords, keys —
-  # never write them to disk.
   systemd.coredump.enable = false;
-
-  # Blocks kexec-based kernel image tampering.
   security.protectKernelImage = true;
 
-  # DNS-over-TLS system-wide (Tor Browser already routes its own DNS
-  # through Tor, so this only affects everything else). Cloudflare + Quad9
-  # both support DoT; "allow-downgrade" avoids hard failures on domains
-  # with broken DNSSEC deployment.
   networking.nameservers = [ "1.1.1.1#cloudflare-dns.com" "9.9.9.9#dns.quad9.net" ];
   services.resolved = {
     enable = true;
@@ -230,26 +171,17 @@
   };
   networking.networkmanager.dns = "systemd-resolved";
 
-  # MAC address randomization.
-  # WiFi: fully random per connection (you're on ethernet now, but this
-  # protects you if you ever use WiFi).
-  # Ethernet: "stable" — a consistent pseudonymous MAC per connection
-  # profile rather than your real hardware MAC, so it won't break any
-  # static DHCP reservation/MAC filtering on your OpenWRT router, while
-  # still not exposing your real hardware identity.
+  # Ethernet stays "stable" (pseudonymous but consistent) so static DHCP
+  # reservations on the router keep working; Wi-Fi is fully random.
   networking.networkmanager.wifi.macAddress = "random";
   networking.networkmanager.wifi.scanRandMacAddress = true;
   networking.networkmanager.ethernet.macAddress = "stable";
 
-  # Disable NetworkManager's periodic external connectivity probe (normally
-  # pings a canary URL to detect captive portals) — one less routine
-  # external phone-home, no functional loss on a directly-connected desktop.
+  # Disable NetworkManager's periodic captive-portal probe.
   networking.networkmanager.settings.connectivity = {
     uri = "";
     interval = 0;
   };
 
-  # Budgie's module turns this on by default (for Budgie Control Center's
-  # Location Services panel) — nothing in this config needs location data.
   services.geoclue2.enable = false;
 }

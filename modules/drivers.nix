@@ -1,43 +1,34 @@
 { config, lib, pkgs, ... }:
 
 {
-  # Enable graphics driver support and 32-bit acceleration (for Steam/gaming)
   hardware.graphics = {
     enable = true;
     enable32Bit = true;
   };
 
-  #OpenTabletDriver
   hardware.opentabletdriver.enable = true;
   hardware.uinput.enable = true;
   boot.kernelModules = [ "uinput" ];
 
   boot.extraModprobeConfig = ''
-    # PS4/PS5 controllers (e.g. DualSense) connect over Bluetooth then
-    # immediately disconnect — a well-known Linux Bluetooth stack issue
-    # where many adapters' Enhanced Retransmission Mode implementation is
-    # broken. Disabling ERTM is the standard, widely-documented fix.
+    # DualSense/PS4 pads pair over Bluetooth then drop instantly; broken
+    # ERTM in many adapters. Disabling it is the standard fix.
     options bluetooth disable_ertm=1
   '';
 
-  # I2C bus, for DDC/CI monitor control (brightness) via ddcutil — this
-  # machine has no laptop backlight, only external DisplayPort monitors.
+  # Blog V4 needs the rtlsdrblog fork of librtlsdr, which is what
+  # pkgs.rtl-sdr already is here. Also blacklists the DVB-T drivers.
+  hardware.rtl-sdr.enable = true;
+
+  # For ddcutil — no laptop backlight here, only external DisplayPort.
   hardware.i2c.enable = true;
 
-  # Load NVIDIA driver for X11 and Wayland
   services.xserver.videoDrivers = [ "nvidia" ];
 
   hardware.nvidia = {
-    # Required settings
     modesetting.enable = true;
-
-    # Enable NVIDIA Open GPU Kernel Modules (Turing architecture or newer)
     open = true;
-
-    # Enable the NVIDIA settings menu
     nvidiaSettings = true;
-
-    # Use the stable driver package matching current kernel
     package = config.boot.kernelPackages.nvidiaPackages.stable;
   };
 }

@@ -1,18 +1,37 @@
 { config, pkgs, ... }:
 
+let
+  # Both SDR++ and rtl_433 default to supporting every radio ever made, which
+  # drags in UHD (USRP firmware), BladeRF and LimeSuite — ~1.5 GB for hardware
+  # we don't own. These two overrides cut that down to the RTL-SDR paths.
+  soapysdrLean = pkgs.soapysdr.override {
+    extraPackages = with pkgs; [ soapyrtlsdr soapyremote ];
+  };
+
+  rtl433Lean = pkgs.rtl_433.override { soapysdr-with-plugins = soapysdrLean; };
+
+  # Leaves the RTL-SDR, rtl_tcp, file and network sources on.
+  sdrppLean = pkgs.sdrpp.override {
+    soapy_source = false;
+    bladerf_source = false;
+    limesdr_source = false;
+    plutosdr_source = false;
+    airspy_source = false;
+    airspyhf_source = false;
+    hermes_source = false;
+    rfspace_source = false;
+    dragonlabs_source = false;
+    spectran_http_source = false;
+  };
+in
 {
-  # Every installed package — GUI apps, CLI tools, and dev toolchains alike.
-  # If it's "install X", it goes here.
   users.users."nexoniarz".packages = with pkgs; [
-    tumbler                   # Thumbnails (paired with services.tumbler.enable; also used by Nemo)
-    gnome-screenshot          # Screenshot capture (X11)
-    imv                       # Image viewer
-    brightnessctl             # Backlight brightness (laptop panels)
-    ddcutil                   # DDC/CI brightness (external monitors)
-    lm_sensors                # sensors-detect helps ddcutil find I2C buses
-    networkmanager            # nmcli, for the Wi-Fi hotspot toggle
-    xdg-user-dirs             # Resolves localized folder names (Obrazy, not Pictures, on pl_PL)
-    playerctl                  # MPRIS media control, for the function-key media binds
+    tumbler
+    brightnessctl
+    ddcutil
+    lm_sensors                # sensors-detect helps ddcutil find the I2C buses
+    networkmanager
+    xdg-user-dirs             # Resolves localized folder names (Obrazy, not Pictures)
 
     # Apps
     blender
@@ -25,36 +44,31 @@
     filezilla
     chromium
     obs-studio
-    easyeffects                # Real-time mic/output effects (pitch, EQ, ...) — auto-creates a
-                                # selectable "Easy Effects Source" virtual mic once an Input effect
-                                # is added, no manual PipeWire routing needed
-    qpwgraph                   # Patchbay GUI — wires EasyEffects'/Soundux's output into the
-                                # standalone "Virtual Microphone Sink" (see system.nix)
-    # Soundux (soundboard) isn't packaged in this nixpkgs channel anymore —
-    # installed via Flatpak instead (io.github.Soundux).
+    sdrppLean
+    rtl433Lean
 
     # Games
     prismlauncher
-    pkgs.osu-lazer-bin
+    osu-lazer-bin
 
-    # Dev: compilers, runtimes, languages
+    # Dev
     glibc
     musl
     cmake
-    gnumake # Provides the 'make' command
+    gnumake
     gcc
     python3
     openjdk25
-    claude-code # AI Developer Assistant
+    claude-code
   ];
 
-  # Global command-line utilities available everywhere
   environment.systemPackages = with pkgs; [
     git
-    gh # GitHub CLI — was only installed ad-hoc before (login didn't survive)
+    gh
     vim
     fastfetch
     gparted
+    efibootmgr
     firejail
     gnupg
     lmstudio
@@ -66,10 +80,11 @@
     kdePackages.kate
     kdePackages.qqc2-desktop-style
     linphonePackages.linphone-desktop
-    kdePackages.kcalc            # Calculator (nothing filled this role before)
-    kdePackages.okular           # Document/PDF viewer (nothing filled this role before)
-    kdePackages.elisa            # Audio player (vlc/ffmpeg cover video already; nothing dedicated for audio)
-    kdePackages.konsole          # Terminal (replaces kitty)
-    kdePackages.dolphin          # File manager (replaces Thunar, alongside Budgie's default Nemo)
+    kdePackages.kcalc
+    kdePackages.okular
+    kdePackages.elisa
+    kdePackages.konsole
+    kdePackages.dolphin
+    kdePackages.plasma-systemmonitor
   ];
 }
