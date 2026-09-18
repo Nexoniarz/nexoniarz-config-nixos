@@ -1,14 +1,21 @@
 { config, pkgs, ... }:
 
 let
+
   # Both SDR++ and rtl_433 default to supporting every radio ever made, which
-  # drags in UHD (USRP firmware), BladeRF and LimeSuite — ~1.5 GB for hardware
-  # we don't own. These two overrides cut that down to the RTL-SDR paths.
+  # drags in UHD (USRP firmware), BladeRF and LimeSuite — ~1.5 GB for
+  # hardware we don't own. These two overrides cut that down to the RTL-SDR paths.
+
   soapysdrLean = pkgs.soapysdr.override {
-    extraPackages = with pkgs; [ soapyrtlsdr soapyremote ];
+    extraPackages = with pkgs; [
+      soapyrtlsdr
+      soapyremote
+    ];
   };
 
-  rtl433Lean = pkgs.rtl_433.override { soapysdr-with-plugins = soapysdrLean; };
+  rtl433Lean = pkgs.rtl_433.override {
+    soapysdr-with-plugins = soapysdrLean;
+  };
 
   # Leaves the RTL-SDR, rtl_tcp, file and network sources on.
   sdrppLean = pkgs.sdrpp.override {
@@ -23,15 +30,17 @@ let
     dragonlabs_source = false;
     spectran_http_source = false;
   };
+
 in
 {
   users.users."nexoniarz".packages = with pkgs; [
+
     tumbler
     brightnessctl
     ddcutil
-    lm_sensors                # sensors-detect helps ddcutil find the I2C buses
+    lm_sensors
     networkmanager
-    xdg-user-dirs             # Resolves localized folder names (Obrazy, not Pictures)
+    xdg-user-dirs
 
     # Apps
     blender
@@ -46,6 +55,8 @@ in
     obs-studio
     sdrppLean
     rtl433Lean
+    lmms
+    openrgb
 
     # Games
     prismlauncher
@@ -86,5 +97,8 @@ in
     kdePackages.konsole
     kdePackages.dolphin
     kdePackages.plasma-systemmonitor
+    qt5.qtwayland
+    qt6.qtwayland
+    qemu
   ];
 }

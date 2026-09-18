@@ -27,7 +27,6 @@
   };
   boot.kernelPackages = pkgs.linuxPackages;
   boot.supportedFilesystems = [ "fuse" ];
-
   networking.hostName = "nixos";
   networking.networkmanager.enable = true;
 
@@ -59,7 +58,7 @@
     dates = "weekly";
     options = "--delete-older-than 7d";
   };
-
+  
   console.keyMap = "pl2";
 
   security.rtkit.enable = true;
@@ -84,6 +83,11 @@
       };
     };
   };
+
+  services.udev.extraRules = ''
+    # OpenRGB
+    SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
+  '';
 
   services.blueman.enable = true;
 
@@ -133,6 +137,8 @@
   ];
   environment.systemPackages = [ pkgs.file ];
 
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
   # --- Hardening ---
 
   # zram instead of disk swap: nothing sensitive is written to disk in
@@ -140,7 +146,7 @@
   # old swap partition regardless of swapDevices, hence the kernel param.
   zramSwap.enable = true;
   swapDevices = lib.mkForce [ ];
-  boot.kernelParams = [ "systemd.gpt_auto=0" ];
+  boot.kernelParams = [ "systemd.gpt_auto=0" "acpi_enforce_resources=lax" ];
 
   boot.kernel.sysctl = {
     "kernel.kptr_restrict" = 2;
@@ -160,6 +166,10 @@
 
   systemd.coredump.enable = false;
   security.protectKernelImage = true;
+   
+  systemd.tmpfiles.rules = [
+    "L+ /var/lib/flatpak/exports/share/applications - - - - /var/lib/flatpak/app/com.usebottles.bottles/current/active/export/share/applications"
+  ];
 
   networking.nameservers = [ "1.1.1.1#cloudflare-dns.com" "9.9.9.9#dns.quad9.net" ];
   services.resolved = {
@@ -182,6 +192,9 @@
     uri = "";
     interval = 0;
   };
-
+  services.hardware.openrgb = {
+    enable = true;
+    motherboard = "amd";
+  };
   services.geoclue2.enable = false;
 }

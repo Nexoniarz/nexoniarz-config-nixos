@@ -1,13 +1,14 @@
 { config, pkgs, ... }:
 
 {
-  # Budgie ships only a Wayland session here (labwc); xserver stays on for
-  # Xwayland and for the xkb layout below.
+  # Plasma ships a proper Wayland session (KWin) with solid Xwayland
+  # support; xserver stays on for that Xwayland layer and for the xkb
+  # layout below, not because the session itself needs it.
   services.xserver.enable = true;
-  services.desktopManager.budgie.enable = true;
+  services.desktopManager.plasma6.enable = true;
 
-  # SDDM replaces lightdm: Qt, and it actually launches Wayland sessions.
-  # Its own greeter runs on weston, not kwin, so no KDE compositor tags along.
+  # SDDM is KDE's own greeter — Qt-based, and launches Wayland sessions
+  # natively, Plasma included.
   services.displayManager.sddm = {
     enable = true;
     wayland.enable = true;
@@ -26,28 +27,11 @@
   # xserver.nix installs xterm unconditionally; Konsole is the terminal here.
   services.xserver.excludePackages = [ pkgs.xterm ];
 
-  # Budgie's module installs GTK/MATE apps that duplicate the Qt ones in
-  # apps.nix. Excluding gnome-terminal also flips programs.gnome-terminal.enable
-  # off — the module gates that on this same list.
-  environment.budgie.excludePackages = with pkgs; [
-    nemo                 # -> dolphin
-    gnome-terminal       # -> konsole
-    eom                  # -> gwenview
-    pluma                # -> kate
-    atril                # -> okular
-    engrampa             # -> ark
-    mate-calc            # -> kcalc
-    mate-system-monitor  # -> plasma-systemmonitor
-  ];
-
+  # Icon/cursor theme packages. Plasma has no gsettings-style declarative
+  # knob for this the way Budgie did — pick them in System Settings, or
+  # bring in plasma-manager later for a fully declarative setup.
   environment.systemPackages = [
     pkgs.gruvbox-plus-icons
     pkgs.bibata-cursors
   ];
-
-  services.desktopManager.budgie.extraGSettingsOverrides = ''
-    [org.gnome.desktop.interface]
-    icon-theme='Gruvbox-Plus-Dark'
-    cursor-theme='Bibata-Modern-Classic'
-  '';
 }
