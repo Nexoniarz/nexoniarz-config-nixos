@@ -17,13 +17,18 @@ My personal NixOS system configuration.
 | File | Contents |
 |---|---|
 | `configuration.nix` | Imports only |
-| `modules/system.nix` | Boot, networking, locale, audio, hardening |
-| `modules/drivers.nix` | GPU, tablet, I2C, RTL-SDR |
-| `modules/desktop.nix` | Plasma, theming |
-| `modules/users.nix` | Account, shell, Steam |
-| `modules/apps.nix` | Installed packages |
-| `modules/scripts.nix` | Custom scripts in `modules/scripts/` |
+| `modules/boot.nix` | Limine, kernel, zram/swap |
+| `modules/networking.nix` | NetworkManager, firewall, DNS-over-TLS, MAC randomization |
+| `modules/locale.nix` | Timezone, locale, console keymap |
+| `modules/nix-settings.nix` | Nix features, GC, unfree |
+| `modules/security.nix` | sysctl hardening, sudo, firejail, GnuPG, polkit |
+| `modules/hardware.nix` | GPU, tablet, Bluetooth, I2C, RTL-SDR, OpenRGB, printing |
+| `modules/audio.nix` | PipeWire |
+| `modules/desktop.nix` | Plasma, SDDM, fonts, theming |
+| `modules/users.nix` | Account, shell, Steam, Flatpak |
+| `modules/apps.nix` | Installed packages, nix-ld |
 | `modules/default-apps.nix` | MIME associations |
+| `modules/scripts.nix` | Custom scripts in `modules/scripts/` |
 
 ---
 

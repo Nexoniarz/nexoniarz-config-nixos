@@ -70,6 +70,7 @@ in
     gcc
     python3
     openjdk25
+    go
     claude-code
   ];
 
@@ -100,5 +101,17 @@ in
     qt5.qtwayland
     qt6.qtwayland
     qemu
+    file
+  ];
+
+  # Lets non-Nix binaries (e.g. the Tor Browser bundle) find an FHS linker.
+  programs.nix-ld.enable = true;
+  programs.nix-ld.libraries = with pkgs; [
+    glib gtk3 gdk-pixbuf pango cairo atk
+    dbus dbus-glib fontconfig freetype
+    libx11 libxext libxrender libxtst
+    libxi libxcomposite libxdamage libxfixes
+    libxrandr libxcursor libxcb libxkbcommon
+    alsa-lib mesa zlib stdenv.cc.cc
   ];
 }

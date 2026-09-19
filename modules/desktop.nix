@@ -14,8 +14,6 @@
     wayland.enable = true;
   };
 
-  security.polkit.enable = true;
-
   services.xserver.xkb = {
     layout = "pl";
     variant = "";
@@ -33,5 +31,19 @@
   environment.systemPackages = [
     pkgs.gruvbox-plus-icons
     pkgs.bibata-cursors
+  ];
+
+  fonts.packages = with pkgs; [
+    corefonts
+    dejavu_fonts
+    noto-fonts
+    noto-fonts-cjk-sans
+    noto-fonts-color-emoji
+    nerd-fonts.fira-code
+    nerd-fonts.jetbrains-mono
+    nerd-fonts.hack
+    inter
+    liberation_ttf
+    roboto
   ];
 }
