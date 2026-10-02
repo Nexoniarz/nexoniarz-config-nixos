@@ -24,9 +24,10 @@ pref("browser.contentblocking.category", "strict");
 // forced light mode, UTC time and English pages on every site.
 pref("privacy.resistFingerprinting", false);
 pref("privacy.spoof_english", 0);
-// Old first-party isolation; Total Cookie Protection replaces it and breaks
-// far fewer cross-site logins.
-pref("privacy.firstparty.isolate", false);
+// First-party isolation stays ON. Every existing cookie in this profile was
+// saved with a first-party tag; turning this off makes Firefox ignore them
+// all (logged out everywhere). Works alongside Strict mode.
+pref("privacy.firstparty.isolate", true);
 
 // Cross-site requests only send the origin (https://site.com/), not the
 // full page URL you came from.
