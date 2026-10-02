@@ -33,6 +33,29 @@
     pkgs.bibata-cursors
   ];
 
+  # The third-party "Bouncing Popups" KWin effect (~/.local/share/kwin/effects)
+  # stacks on top of Plasma's own slidingpopups/fadingpopups and forces blur
+  # on every popup and the panel, making applet popups and panel settings
+  # open sluggishly. [$i] locks the key so ~/.config/kwinrc can't re-enable it.
+  environment.etc."xdg/kwinrc".text = ''
+    [Plugins]
+    bouncingPopupsEnabled[$i]=false
+  '';
+
+  # Breeze Dark as the default Plasma (panel/popup) theme. Avoid sparse
+  # third-party themes like "Darkly" (18 files): every SVG they lack falls
+  # back via an uncached search of all ~89 XDG_DATA_DIRS, which made applet
+  # popups and panel settings take 2-6 s to open. Not locked, so the theme
+  # can still be changed in System Settings.
+  environment.etc."xdg/plasmarc".text = ''
+    [Theme]
+    name=breeze-dark
+  '';
+
+  environment.extraInit = ''
+    export XDG_DATA_DIRS="$XDG_DATA_DIRS:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}"
+  '';
+
   fonts.packages = with pkgs; [
     corefonts
     dejavu_fonts

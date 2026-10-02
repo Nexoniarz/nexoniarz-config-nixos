@@ -15,6 +15,17 @@
     package = config.boot.kernelPackages.nvidiaPackages.stable;
   };
 
+  # Hardware video decoding in Firefox via nvidia-vaapi-driver (installed by
+  # hardware.nvidia.videoAcceleration). libva needs the driver named
+  # explicitly; the "direct" backend is the working one on driver 525+.
+  # Firefox's decoder (RDD) sandbox blocks the driver, so it's disabled:
+  # trade-off accepted for GPU decode. Prefs live in the profile's user.js.
+  environment.sessionVariables = {
+    LIBVA_DRIVER_NAME = "nvidia";
+    NVD_BACKEND = "direct";
+    MOZ_DISABLE_RDD_SANDBOX = "1";
+  };
+
   hardware.opentabletdriver.enable = true;
   hardware.uinput.enable = true;
   boot.kernelModules = [ "uinput" ];
@@ -32,7 +43,7 @@
       };
     };
   };
-  services.blueman.enable = true;
+  # Plasma ships its own Bluetooth UI (Bluedevil); blueman just duplicated it.
 
   boot.extraModprobeConfig = ''
     # DualSense/PS4 pads pair over Bluetooth then drop instantly; broken
