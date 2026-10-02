@@ -57,6 +57,7 @@ in
     rtl433Lean
     lmms
     openrgb
+    krita
 
     # Games
     prismlauncher
@@ -72,6 +73,7 @@ in
     openjdk25
     go
     claude-code
+    codex
   ];
 
   environment.systemPackages = with pkgs; [
@@ -98,10 +100,17 @@ in
     kdePackages.konsole
     kdePackages.dolphin
     kdePackages.plasma-systemmonitor
+    kdePackages.kdialog
     qt5.qtwayland
     qt6.qtwayland
     qemu
     file
+    wineWow64Packages.stable
+    ghidra
+    jdk
+    python3
+    radare2
+    binwalk
   ];
 
   # Lets non-Nix binaries (e.g. the Tor Browser bundle) find an FHS linker.
