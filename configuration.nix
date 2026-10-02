@@ -21,6 +21,8 @@
     ./modules/apps.nix
     ./modules/default-apps.nix
     ./modules/scripts.nix
+    ./modules/fastfetch.nix
+    ./modules/firefox.nix
   ];
 
   # Do not change this value. Read documentation before updating.

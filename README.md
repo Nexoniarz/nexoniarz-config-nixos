@@ -29,6 +29,9 @@ My personal NixOS system configuration.
 | `modules/apps.nix` | Installed packages, nix-ld |
 | `modules/default-apps.nix` | MIME associations |
 | `modules/scripts.nix` | Custom scripts in `modules/scripts/` |
+| `modules/fastfetch.nix` | Installs `configs/fastfetch/config.jsonc` system-wide |
+| `modules/firefox.nix` | Firefox, with prefs from `configs/firefox/prefs.js` (reapplied each start, not locked) |
+| `configs/` | Plain app config files (Firefox prefs, fastfetch) used by the modules |
 
 ---
 

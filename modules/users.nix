@@ -9,7 +9,6 @@
   };
 
   programs.zsh.enable = true;
-  programs.firefox.enable = true;
 
   programs.steam = {
     enable = true;
