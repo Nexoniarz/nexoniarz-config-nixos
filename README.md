@@ -10,7 +10,7 @@ My personal NixOS system configuration.
 - **Terminal:** Konsole
 - **Shell:** Zsh
 - **Audio:** PipeWire
-- **GPU:** NVIDIA (open kernel modules, primary) + Radeon Vega 8 iGPU (compute)
+- **GPU:** Radeon Vega 8 iGPU for the desktop, NVIDIA RTX 3060 Ti (open kernel modules) via PRIME offload for games and LLMs
 
 ## Layout
 

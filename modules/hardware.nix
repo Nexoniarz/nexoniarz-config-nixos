@@ -6,35 +6,47 @@
     enable32Bit = true;
   };
 
-  # NVIDIA stays primary (monitors are on it); the 5700G's Radeon Vega 8 iGPU
-  # is a second GPU for compute, e.g. LM Studio's Vulkan runtime. It must be
-  # enabled in the BIOS (Integrated Graphics = Forced, primary = PEG/PCIe).
-  # The amdgpu kernel module loads by itself, and hardware.graphics already
-  # provides Mesa's RADV Vulkan driver for it.
-  services.xserver.videoDrivers = [ "nvidia" "amdgpu" ];
-
-  environment.systemPackages = with pkgs; [
-    vulkan-tools   # vulkaninfo --summary: check both GPUs are visible
-    amdgpu_top     # usage/VRAM monitor for the iGPU
-  ];
+  # PRIME offload: the 5700G's Radeon Vega 8 iGPU runs the desktop (monitors
+  # plugged into the motherboard), the RTX 3060 Ti only wakes up for games
+  # and LLMs. Needs in the BIOS: Integrated Graphics = Forced/Enabled and
+  # primary display = IGD/iGPU. KWin then picks the iGPU as the boot VGA.
+  # amdgpu loads by itself; hardware.graphics provides Mesa (RADV, radeonsi).
+  services.xserver.videoDrivers = [ "nvidia" ];
 
   hardware.nvidia = {
     modesetting.enable = true;
     open = true;
     nvidiaSettings = true;
     package = config.boot.kernelPackages.nvidiaPackages.stable;
+
+    prime = {
+      offload.enable = true;
+      offload.enableOffloadCmd = true;   # `nvidia-offload <app>` runs it on the RTX
+      amdgpuBusId = "PCI:7:0:0";
+      nvidiaBusId = "PCI:1:0:0";
+    };
   };
 
-  # Hardware video decoding in Firefox via nvidia-vaapi-driver (installed by
-  # hardware.nvidia.videoAcceleration). libva needs the driver named
-  # explicitly; the "direct" backend is the working one on driver 525+.
-  # Firefox's decoder (RDD) sandbox blocks the driver, so it's disabled:
-  # trade-off accepted for GPU decode. Prefs live in the profile's user.js.
-  environment.sessionVariables = {
-    LIBVA_DRIVER_NAME = "nvidia";
-    NVD_BACKEND = "direct";
-    MOZ_DISABLE_RDD_SANDBOX = "1";
+  # Everything Steam launches (games, Proton/DXVK) renders on the RTX. Same
+  # variables nvidia-offload sets; CUDA apps (LM Studio) don't need them.
+  programs.steam.package = pkgs.steam.override {
+    extraEnv = {
+      __NV_PRIME_RENDER_OFFLOAD = "1";
+      __NV_PRIME_RENDER_OFFLOAD_PROVIDER = "NVIDIA-G0";
+      __GLX_VENDOR_LIBRARY_NAME = "nvidia";
+      __VK_LAYER_NV_optimus = "NVIDIA_only";
+    };
   };
+
+  environment.systemPackages = with pkgs; [
+    vulkan-tools   # vulkaninfo --summary: check both GPUs are visible
+    amdgpu_top     # usage monitor for the iGPU
+  ];
+
+  # Firefox video decoding runs on the iGPU through Mesa's radeonsi VA-API
+  # driver, which libva finds on its own: no env vars, and Firefox's decoder
+  # (RDD) sandbox stays on. Vega 8 decodes H.264, HEVC and VP9; AV1 falls
+  # back to the CPU.
 
   hardware.opentabletdriver.enable = true;
   hardware.uinput.enable = true;
