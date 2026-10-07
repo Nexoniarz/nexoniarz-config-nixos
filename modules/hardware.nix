@@ -6,7 +6,17 @@
     enable32Bit = true;
   };
 
-  services.xserver.videoDrivers = [ "nvidia" ];
+  # NVIDIA stays primary (monitors are on it); the 5700G's Radeon Vega 8 iGPU
+  # is a second GPU for compute, e.g. LM Studio's Vulkan runtime. It must be
+  # enabled in the BIOS (Integrated Graphics = Forced, primary = PEG/PCIe).
+  # The amdgpu kernel module loads by itself, and hardware.graphics already
+  # provides Mesa's RADV Vulkan driver for it.
+  services.xserver.videoDrivers = [ "nvidia" "amdgpu" ];
+
+  environment.systemPackages = with pkgs; [
+    vulkan-tools   # vulkaninfo --summary: check both GPUs are visible
+    amdgpu_top     # usage/VRAM monitor for the iGPU
+  ];
 
   hardware.nvidia = {
     modesetting.enable = true;

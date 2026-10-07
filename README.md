@@ -10,7 +10,7 @@ My personal NixOS system configuration.
 - **Terminal:** Konsole
 - **Shell:** Zsh
 - **Audio:** PipeWire
-- **GPU:** NVIDIA (open kernel modules)
+- **GPU:** NVIDIA (open kernel modules, primary) + Radeon Vega 8 iGPU (compute)
 
 ## Layout
 
