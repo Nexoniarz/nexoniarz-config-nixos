@@ -39,6 +39,8 @@ My personal NixOS system configuration.
 
 Passwords of 5-15 words or 12-64 characters, "did you mean" for typos, "stay unlocked" for a few minutes (kernel keyring), encrypted export/import shared with the NexoPass Android app, and `nexopass settings`. Run `nexopass help` for everything else. Apache License 2.0.
 
+`nexopass-gui` is the [NexoPass](https://github.com/Nexoniarz/NexoPass) window (also on Android and Windows), fetched from its GitHub release. It uses the same files as `nexopass`, so both see the same accounts and app password.
+
 ---
 
 *Made by **Nexoniarz***
