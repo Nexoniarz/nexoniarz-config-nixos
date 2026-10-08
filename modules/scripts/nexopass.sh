@@ -7,6 +7,9 @@
 # archive of old versions. It is encrypted (GnuPG, AES-256) with a key that is
 # also derived from the master.
 #
+# Case never matters: the master, site names and account names are lowercased.
+# The master is a list of words: any whitespace between them counts as one space.
+#
 # Must stay byte-for-byte compatible with the NexoPass Android app.
 
 set -euo pipefail
@@ -33,45 +36,71 @@ CLIP_SECONDS=30
 SEP=$'\x1f'
 VAULT_HEADER="# nexopass vault v1"
 
-die() { echo "[!] $*" >&2; exit 1; }
-info() { echo "[*] $*" >&2; }
+if [[ -t 1 && -t 2 && -z ${NO_COLOR:-} ]]; then
+    RST=$'\e[0m' BOLD=$'\e[1m' DIM=$'\e[2m' RED=$'\e[31m' GREEN=$'\e[32m'
+    YELLOW=$'\e[33m' MAGENTA=$'\e[35m' CYAN=$'\e[36m'
+else
+    RST="" BOLD="" DIM="" RED="" GREEN="" YELLOW="" MAGENTA="" CYAN=""
+fi
+
+die() { echo "${RED}[!]${RST} $*" >&2; exit 1; }
+info() { echo "${CYAN}[*]${RST} $*" >&2; }
+warn() { echo "${YELLOW}[!]${RST} $*" >&2; }
+ok() { echo "${GREEN}[+]${RST} $*"; }
 
 usage() {
-    cat <<'EOF'
-NexoPass - passwords derived from one master, nothing stored in plain text.
+    cat <<EOF
+${BOLD}${MAGENTA}NexoPass${RST} - passwords derived from one master, nothing stored in plain text.
 
-Usage: nexopass [command] [site] [options]
+${BOLD}Usage:${RST} nexopass [command] [site] [options]
 
-Commands:
-  get <site>       Show the password for a site (adds the site on first use)
-  rotate <site>    After a breach: switch to the next version, archive the old one
-  list             List your sites with their current version
-  history <site>   Show all versions of a site, old ones included
-  remove <site>    Remove a site from the list (passwords themselves don't change)
-  new-master       Generate a random 6-word master
-  help             Show this help
+${BOLD}Commands:${RST}
+  ${CYAN}get${RST} <site>       Show the password for a site (adds the site on first use)
+  ${CYAN}rotate${RST} <site>    After a breach: switch to the next version, archive the old one
+  ${CYAN}list${RST}             List your sites with their current version
+  ${CYAN}history${RST} <site>   Show all versions of a site, old ones included
+  ${CYAN}remove${RST} <site>    Remove a site from the list (passwords themselves don't change)
+  ${CYAN}new-master${RST} [N]   Generate a random master of N words (default 6)
+  ${CYAN}help${RST}             Show this help
 
   nexopass <site>  Same as: nexopass get <site>
   nexopass         Interactive session: master asked once, then type commands
 
-Options:
+${BOLD}Options:${RST}
   -u, --user NAME    Account name, for several accounts on one site
   -n, --length N     Random characters (12-64) instead of words, for sites
                      with a length limit; set when adding or rotating a site
   -v, --version N    Start a new site at version N (e.g. already rotated on phone)
-  -c, --copy         Copy to clipboard (cleared after 30 s) instead of printing
+  -c, --copy         Copy to clipboard (cleared after $CLIP_SECONDS s) instead of printing
   -s, --show         With list/history: also show the passwords
   -h, --help         Show this help
+
+Upper and lower case never matter. The master is one or more words separated by
+spaces; 5-6 random words are recommended.
 EOF
 }
 
-# --- site names -------------------------------------------------------------
+# --- normalization ----------------------------------------------------------
+
+trim() {
+    local s=$1
+    s="${s#"${s%%[![:space:]]*}"}"
+    printf '%s' "${s%"${s##*[![:space:]]}"}"
+}
+
+# Unicode-aware lowercase. Runs in a subshell with builtins only, so the value
+# never reaches the process list.
+lower() {
+    (
+        LC_ALL=C.UTF-8
+        printf '%s' "${1,,}"
+    )
+}
 
 # 'https://www.Allegro.pl/konto' -> 'allegro', 'Discord' -> 'discord'
 normalize_site() {
-    local s="${1,,}" n
-    s="${s#"${s%%[![:space:]]*}"}"
-    s="${s%"${s##*[![:space:]]}"}"
+    local s n
+    s=$(trim "${1,,}")
     [[ $s == *://* ]] && s="${s#*://}"
     s="${s%%[/?#]*}"
     s="${s##*@}"
@@ -92,11 +121,33 @@ normalize_site() {
 }
 
 normalize_user() {
-    local u="${1,,}"
-    u="${u#"${u%%[![:space:]]*}"}"
-    u="${u%"${u##*[![:space:]]}"}"
+    local u
+    u=$(trim "$(lower "$1")")
     [[ $u != *[[:cntrl:]]* ]] || return 1
     printf '%s' "$u"
+}
+
+# Lowercase, and any run of spaces/tabs/newlines becomes a single space.
+normalize_master() {
+    local -a w
+    read -ra w <<<"$(lower "$1")"
+    local IFS=' '
+    MASTER="${w[*]}"
+}
+
+# Warns about masters that someone with one leaked password could guess.
+master_strength() {
+    local -a w
+    read -ra w <<<"$MASTER"
+    local word all_eff=1
+    for word in "${w[@]}"; do
+        [[ -n ${WORD_SET[$word]:-} ]] || all_eff=0
+    done
+    if ((all_eff && ${#w[@]} < 5)) || ((${#MASTER} < 16)); then
+        warn "Weak master: ${#w[@]} word(s), ${#MASTER} characters."
+        warn "If one site leaks your password, a master this short can be guessed. 5-6 random words are recommended."
+        return 1
+    fi
 }
 
 # --- key derivation ---------------------------------------------------------
@@ -138,9 +189,11 @@ load_words() {
     sum=$(sha256sum "$WORDLIST")
     [[ ${sum%% *} == "$WORDLIST_SHA256" ]] || die "Word list differs from the EFF original, passwords would not match."
     WORDS=()
+    declare -gA WORD_SET=()
     local _num word
     while IFS=$'\t' read -r _num word; do
         WORDS+=("$word")
+        WORD_SET[$word]=1
     done <"$WORDLIST"
 }
 
@@ -248,11 +301,70 @@ add_record() {
     R_SITE+=("$1") R_USER+=("$2") R_VER+=("$3") R_MODE+=("$4") R_SINCE+=("$(date +%F)") R_UNTIL+=("")
 }
 
+# --- typo suggestions -------------------------------------------------------
+
+# distance <a> <b>: edit distance into REPLY, a swap of two letters counts as one.
+distance() {
+    local a=$1 b=$2 la=${#1} lb=${#2} w i j cost v
+    w=$((lb + 1))
+    local -a d=()
+    for ((i = 0; i <= la; i++)); do d[i * w]=$i; done
+    for ((j = 0; j <= lb; j++)); do d[j]=$j; done
+    for ((i = 1; i <= la; i++)); do
+        for ((j = 1; j <= lb; j++)); do
+            cost=1
+            [[ ${a:i-1:1} == "${b:j-1:1}" ]] && cost=0
+            v=$((d[(i - 1) * w + j] + 1))
+            ((d[i * w + j - 1] + 1 < v)) && v=$((d[i * w + j - 1] + 1))
+            ((d[(i - 1) * w + j - 1] + cost < v)) && v=$((d[(i - 1) * w + j - 1] + cost))
+            if ((i > 1 && j > 1)) && [[ ${a:i-1:1} == "${b:j-2:1}" && ${a:i-2:1} == "${b:j-1:1}" ]]; then
+                ((d[(i - 2) * w + j - 2] + 1 < v)) && v=$((d[(i - 2) * w + j - 2] + 1))
+            fi
+            d[i * w + j]=$v
+        done
+    done
+    REPLY=${d[la * w + lb]}
+}
+
+# If SITE/USER_NAME is not on the list but something close is, asks whether
+# that was meant and switches to it. An exact match never asks anything.
+resolve_typo() {
+    find_current "$SITE" "$USER_NAME" && return 0
+    local i limit=2 n=0 ans
+    ((${#SITE} <= 4)) && limit=1
+    local -a cand=()
+    while IFS=' ' read -r _ i; do
+        [[ -n $i ]] && cand+=("$i")
+    done < <(
+        for i in "${!R_SITE[@]}"; do
+            [[ -z ${R_UNTIL[i]} ]] || continue
+            if ((${#SITE} - ${#R_SITE[i]} > limit || ${#R_SITE[i]} - ${#SITE} > limit)); then continue; fi
+            distance "$SITE" "${R_SITE[i]}"
+            ((REPLY <= limit)) && echo "$REPLY $i"
+        done | sort -n | head -5
+    )
+    ((${#cand[@]})) || return 1
+    echo "${YELLOW}?${RST} '$(label "$SITE" "$USER_NAME")' is not on your list. Did you mean:" >&2
+    for i in "${cand[@]}"; do
+        n=$((n + 1))
+        echo "  ${BOLD}$n)${RST} $(label "${R_SITE[i]}" "${R_USER[i]}")" >&2
+    done
+    echo "  ${BOLD}0)${RST} no, '$(label "$SITE" "$USER_NAME")' is a different site" >&2
+    read -rp "Choice [1]: " ans </dev/tty
+    ans=${ans:-1}
+    [[ $ans =~ ^[0-9]{1,2}$ ]] || return 1
+    ((ans >= 1 && ans <= ${#cand[@]})) || return 1
+    i=${cand[ans - 1]}
+    SITE=${R_SITE[i]} USER_NAME=${R_USER[i]}
+    find_current "$SITE" "$USER_NAME"
+}
+
 # --- output -----------------------------------------------------------------
 
 label() {
-    local s="$1 v$3"
-    [[ -n $2 ]] && s="$1 ($2) v$3"
+    local s=$1
+    [[ -n $2 ]] && s="$1 ($2)"
+    [[ -n ${3:-} ]] && s+=" v$3"
     printf '%s' "$s"
 }
 
@@ -265,16 +377,16 @@ output_password() {
             [[ "$(wl-paste -n 2>/dev/null)" == "$pw" ]] && wl-copy --clear
         ) &>/dev/null &
         disown
-        echo "[+] $1: copied, clipboard clears in $CLIP_SECONDS s."
+        ok "${BOLD}$1${RST}: copied, clipboard clears in $CLIP_SECONDS s."
     else
-        echo "[+] $1:"
-        printf '%s\n' "$PASSWORD"
+        ok "${BOLD}$1${RST}:"
+        printf '    %s\n' "${BOLD}${MAGENTA}$PASSWORD${RST}"
     fi
 }
 
 ask_yes() {
     local answer
-    read -rp "$1 [y/N] " answer </dev/tty
+    read -rp "${YELLOW}?${RST} $1 [y/N] " answer </dev/tty
     [[ $answer == [yY]* ]]
 }
 
@@ -289,7 +401,7 @@ cmd_get() {
     need_site
     vault_load
     local i mode
-    if find_current "$SITE" "$USER_NAME"; then
+    if resolve_typo; then
         i=$REPLY
         [[ -z $LENGTH || ${R_MODE[i]} == "chars$LENGTH" ]] ||
             info "Length is fixed per version; use 'rotate -n $LENGTH' to change it."
@@ -298,11 +410,11 @@ cmd_get() {
     else
         mode=words
         [[ -n $LENGTH ]] && mode="chars$LENGTH"
-        ask_yes "'$SITE' is not on your list yet. Add it?" || die "Cancelled."
+        ask_yes "Add '$(label "$SITE" "$USER_NAME")' to your list?" || die "Cancelled."
         add_record "$SITE" "$USER_NAME" "${VERSION_ARG:-1}" "$mode"
         vault_save
         i=$((${#R_SITE[@]} - 1))
-        echo "[+] Added $(label "$SITE" "$USER_NAME" "${R_VER[i]}")."
+        ok "Added $(label "$SITE" "$USER_NAME" "${R_VER[i]}")."
     fi
     make_password "$SITE" "$USER_NAME" "${R_VER[i]}" "${R_MODE[i]}"
     output_password "$(label "$SITE" "$USER_NAME" "${R_VER[i]}")"
@@ -311,28 +423,31 @@ cmd_get() {
 cmd_rotate() {
     need_site
     vault_load
-    find_current "$SITE" "$USER_NAME" || die "'$SITE' is not on your list. Use: nexopass get $SITE_ARG"
+    resolve_typo || die "'$SITE' is not on your list. Use: nexopass get $SITE_ARG"
     local i=$REPLY mode version
     mode=${R_MODE[i]}
     [[ -n $LENGTH ]] && mode="chars$LENGTH"
     version=$((R_VER[i] + 1))
+    ask_yes "Archive version ${R_VER[i]} of $(label "$SITE" "$USER_NAME") and switch to version $version?" || die "Cancelled."
     R_UNTIL[i]=$(date +%F)
     add_record "$SITE" "$USER_NAME" "$version" "$mode"
     vault_save
-    echo "[+] Version ${R_VER[i]} archived. Change the password on the site to:"
+    ok "Version ${R_VER[i]} archived. Now change the password on the site to:"
     make_password "$SITE" "$USER_NAME" "$version" "$mode"
     output_password "$(label "$SITE" "$USER_NAME" "$version")"
 }
 
 print_rows() {
-    local i
-    printf '%-20s %-18s %-4s %-8s %-10s %s\n' SITE USER VER MODE SINCE UNTIL
+    local i state
+    printf '%s%-20s %-18s %-5s %-8s %-10s %s%s\n' "$DIM" SITE USER VER MODE SINCE UNTIL "$RST"
     for i in "$@"; do
-        printf '%-20s %-18s %-4s %-8s %-10s %s\n' "${R_SITE[i]}" "${R_USER[i]:--}" "v${R_VER[i]}" \
-            "${R_MODE[i]}" "${R_SINCE[i]}" "${R_UNTIL[i]:-current}"
+        state="${GREEN}current${RST}"
+        [[ -n ${R_UNTIL[i]} ]] && state="${DIM}${R_UNTIL[i]}${RST}"
+        printf '%s%-20s%s %-18s %s%-5s%s %-8s %-10s %s\n' "$BOLD" "${R_SITE[i]}" "$RST" "${R_USER[i]:--}" \
+            "$CYAN" "v${R_VER[i]}" "$RST" "${R_MODE[i]}" "${R_SINCE[i]}" "$state"
         if ((SHOW)); then
             make_password "${R_SITE[i]}" "${R_USER[i]}" "${R_VER[i]}" "${R_MODE[i]}"
-            printf '    %s\n' "$PASSWORD"
+            printf '    %s\n' "${MAGENTA}$PASSWORD${RST}"
         fi
     done
 }
@@ -356,40 +471,40 @@ cmd_list() {
 cmd_history() {
     need_site
     vault_load
+    resolve_typo || die "'$SITE' is not on your list."
     local -a rows=()
     local i
     while IFS= read -r i; do rows+=("$i"); done < <(
         for i in "${!R_SITE[@]}"; do
-            [[ ${R_SITE[i]} == "$SITE" ]] && printf '%s\t%s\t%s\n' "${R_USER[i]}" "${R_VER[i]}" "$i"
-        done | sort -t $'\t' -k1,1 -k2,2n | cut -f3
+            [[ ${R_SITE[i]} == "$SITE" && ${R_USER[i]} == "$USER_NAME" ]] && printf '%s\t%s\n' "${R_VER[i]}" "$i"
+        done | sort -n | cut -f2
     )
-    ((${#rows[@]})) || die "'$SITE' is not on your list."
     print_rows "${rows[@]}"
 }
 
 cmd_remove() {
     need_site
     vault_load
-    find_current "$SITE" "$USER_NAME" || die "'$SITE' is not on your list."
-    ask_yes "Remove $(label "$SITE" "$USER_NAME" "${R_VER[REPLY]}") and its history from the list?" || die "Cancelled."
+    resolve_typo || die "'$SITE' is not on your list."
+    ask_yes "Remove $(label "$SITE" "$USER_NAME") and its history from the list?" || die "Cancelled."
     local i
-    local -a keep=()
-    for i in "${!R_SITE[@]}"; do
-        [[ ${R_SITE[i]} == "$SITE" && ${R_USER[i]} == "$USER_NAME" ]] || keep+=("$i")
-    done
     local -a s=() u=() v=() m=() a=() b=()
-    for i in "${keep[@]}"; do
+    for i in "${!R_SITE[@]}"; do
+        [[ ${R_SITE[i]} == "$SITE" && ${R_USER[i]} == "$USER_NAME" ]] && continue
         s+=("${R_SITE[i]}") u+=("${R_USER[i]}") v+=("${R_VER[i]}") m+=("${R_MODE[i]}") a+=("${R_SINCE[i]}") b+=("${R_UNTIL[i]}")
     done
     R_SITE=("${s[@]}") R_USER=("${u[@]}") R_VER=("${v[@]}") R_MODE=("${m[@]}") R_SINCE=("${a[@]}") R_UNTIL=("${b[@]}")
     vault_save
-    echo "[+] Removed."
+    ok "Removed."
 }
 
 cmd_new_master() {
-    local -a pick6
-    mapfile -t pick6 < <(printf '%s\n' "${WORDS[@]}" | shuf -n 6 --random-source=/dev/urandom)
-    echo "${pick6[*]}"
+    local count=${SITE_ARG:-6}
+    [[ $count =~ ^[1-9][0-9]?$ ]] || die "Number of words must be 1-99."
+    local -a picked
+    mapfile -t picked < <(printf '%s\n' "${WORDS[@]}" | shuf -n "$count" --random-source=/dev/urandom)
+    echo "${BOLD}${MAGENTA}${picked[*]}${RST}"
+    ((count >= 5)) || warn "Fewer than 5 words is weak, see 'nexopass help'."
 }
 
 # --- argument handling ------------------------------------------------------
@@ -401,7 +516,7 @@ parse_args() {
         -u | --user | -n | --length | -v | --version)
             (($# >= 2)) || die "$1 needs a value."
             case $1 in
-            -u | --user) USER_NAME=$(normalize_user "$2") || die "Invalid user name." ;;
+            -u | --user) USER_NAME=$(normalize_user "$2") || die "Invalid account name." ;;
             -n | --length) LENGTH=$2 ;;
             -v | --version) VERSION_ARG=$2 ;;
             esac
@@ -413,7 +528,7 @@ parse_args() {
         -*) die "Unknown option: $1 (see nexopass help)" ;;
         *)
             if [[ -z $CMD ]]; then
-                CMD=$1
+                CMD=${1,,}
             elif [[ -z $SITE_ARG ]]; then
                 SITE_ARG=$1
             else
@@ -449,16 +564,20 @@ run_command() {
 }
 
 read_master() {
-    read -rsp "Master: " MASTER </dev/tty
+    local raw
+    read -rsp "${BOLD}Master:${RST} " raw </dev/tty
     echo >&2
+    normalize_master "$raw"
     [[ -n $MASTER ]] || die "Empty master."
     ((${#MASTER} <= 127)) || die "Master is too long (max 127 bytes)."
     if [[ ! -f $VAULT ]]; then
-        local again
-        read -rsp "No vault yet, so this is your first run. Repeat master: " again </dev/tty
+        local first=$MASTER
+        read -rsp "No vault yet, so this is your first run. Repeat master: " raw </dev/tty
         echo >&2
-        [[ $MASTER == "$again" ]] || die "Masters don't match."
-        info "Check words: $(check_words)"
+        normalize_master "$raw"
+        [[ $MASTER == "$first" ]] || die "Masters don't match."
+        master_strength || ask_yes "Use it anyway?" || die "Cancelled."
+        info "Check words: ${BOLD}$(check_words)${RST}"
         info "Remember them: the phone app shows the same words for the same master."
     fi
     info "Unlocking..."
@@ -466,14 +585,20 @@ read_master() {
     vault_load
 }
 
+banner() {
+    echo "${MAGENTA}${BOLD}  ╭──────────────────╮${RST}"
+    echo "${MAGENTA}${BOLD}  │${RST}  ${BOLD}N E X O P A S S${RST} ${MAGENTA}${BOLD}│${RST}"
+    echo "${MAGENTA}${BOLD}  ╰──────────────────╯${RST}"
+}
+
 session() {
-    echo "[+] Unlocked. Commands: <site>, get, rotate, list, history, remove, help, quit"
+    ok "Unlocked. Commands: ${CYAN}<site>  get  rotate  list  history  remove  help  quit${RST}"
     local line
     local -a words
-    while IFS= read -rep "nexopass> " line; do
+    while IFS= read -rep "${MAGENTA}nexopass›${RST} " line; do
         read -ra words <<<"$line"
         ((${#words[@]})) || continue
-        case ${words[0]} in
+        case ${words[0],,} in
         quit | exit | q) break ;;
         esac
         (
@@ -489,6 +614,7 @@ main() {
     case $CMD in
     help) usage && return ;;
     new-master) cmd_new_master && return ;;
+    "") banner ;;
     esac
     read_master
     if [[ -z $CMD ]]; then

@@ -35,7 +35,7 @@ My personal NixOS system configuration.
 
 ## NexoPass
 
-`nexopass` (in `modules/scripts/`) derives site passwords from one master with Argon2id, so no password is ever stored. An encrypted vault in `~/.local/share/nexopass/` keeps only the site list, current versions and an archive of old versions. Run `nexopass help` for usage.
+`nexopass` (in `modules/scripts/`) derives site passwords from one master with Argon2id, so no password is ever stored. An encrypted vault in `~/.local/share/nexopass/` keeps only the site list, current versions and an archive of old versions. Case never matters, typos get a "did you mean" prompt. Run `nexopass help` for usage.
 
 ---
 
