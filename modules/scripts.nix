@@ -5,7 +5,7 @@ let
   stripMetadata = pkgs.writeShellScriptBin "strip-metadata" (builtins.readFile ./scripts/strip-metadata.sh);
   nexopass = pkgs.writeShellApplication {
     name = "nexopass";
-    runtimeInputs = with pkgs; [ libargon2 gnupg wl-clipboard coreutils ];
+    runtimeInputs = with pkgs; [ libargon2 gnupg wl-clipboard keyutils coreutils gnused ];
     runtimeEnv.NEXOPASS_WORDLIST = "${./scripts/eff_large_wordlist.txt}";
     text = builtins.readFile ./scripts/nexopass.sh;
   };
