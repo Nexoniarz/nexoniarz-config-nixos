@@ -33,6 +33,10 @@ My personal NixOS system configuration.
 | `modules/firefox.nix` | Firefox, with prefs from `configs/firefox/prefs.js` (reapplied each start, not locked) |
 | `configs/` | Plain app config files (Firefox prefs, fastfetch) used by the modules |
 
+## NexoPass
+
+`nexopass` (in `modules/scripts/`) derives site passwords from one master with Argon2id, so no password is ever stored. An encrypted vault in `~/.local/share/nexopass/` keeps only the site list, current versions and an archive of old versions. Run `nexopass help` for usage.
+
 ---
 
 *Made by **Nexoniarz***
