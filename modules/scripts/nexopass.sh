@@ -2,29 +2,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Nexoniarz
 #
-# NexoPass: passwords derived from one master, nothing stored in plain text.
+# NexoPass: passwords derived from a master, nothing stored in plain text.
 #
 # password = Argon2id(master, site + version + mode + user). The same input
 # always gives the same password, so no password is ever saved anywhere.
-# The vault only remembers which sites you use, their current version and the
-# archive of old versions. It is encrypted (GnuPG, AES-256) with a key that is
-# also derived from the master.
 #
-# Case never matters: the master, site names and account names are lowercased.
-# The master is a list of words: any whitespace between them counts as one space.
+# You can have several accounts, each with its own master and its own vault:
+# the list of sites, their current version and an archive of old versions,
+# encrypted (GnuPG, AES-256) with a key derived from that account's master.
+# One app password (or PIN) unlocks NexoPass: it encrypts the keyring that
+# holds every account's master, so a master is typed only to create or
+# recover an account.
+#
+# Case never matters: masters, site names and account names are lowercased.
+# A master is a list of words: any whitespace between them counts as one space.
 #
 # Must stay byte-for-byte compatible with the NexoPass Android app.
 
 set -euo pipefail
 export LC_ALL=C
 
-NEXOPASS_VERSION="1.1.0"
+NEXOPASS_VERSION="1.2.0"
 WORDLIST="${NEXOPASS_WORDLIST:-$(dirname "$(readlink -f "$0")")/eff_large_wordlist.txt}"
 WORDLIST_SHA256="addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e"
-VAULT="${NEXOPASS_VAULT:-${XDG_DATA_HOME:-$HOME/.local/share}/nexopass/vault.gpg}"
-DATA_DIR=$(dirname "$VAULT")
-QUICK="$DATA_DIR/quick.gpg"
-QUICK_META="$DATA_DIR/quick.meta"
+BASE_DIR="${NEXOPASS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/nexopass}"
+ACCOUNTS_DIR="$BASE_DIR/accounts"
+KEYRING="$BASE_DIR/keyring.gpg"
+KEYRING_META="$BASE_DIR/keyring.meta"
 CONFIG="${NEXOPASS_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/nexopass/config}"
 
 # Changing any of these changes every password.
@@ -33,14 +37,14 @@ ARGON_T=3
 ARGON_M=16 # 2^16 KiB = 64 MiB
 ARGON_P=1
 SITE_BYTES=1024
-WORD_COUNT=5
+WORD_COUNT=5 # "words" means 5; other counts are "words<N>" (5-15)
 UPPER="ABCDEFGHJKLMNPQRSTUVWXYZ"
 LOWER="abcdefghijkmnopqrstuvwxyz"
 DIGITS="23456789"
 SYMBOLS='!@#$%&*?-_+='
 TWO_PART_TLDS="com.pl net.pl org.pl edu.pl gov.pl info.pl biz.pl co.uk org.uk ac.uk com.au co.jp com.br"
 
-# Quick unlock keys are slower on purpose: a PIN has few combinations.
+# The app password key is slower on purpose: a PIN has few combinations.
 QUICK_T=4
 QUICK_M=18 # 2^18 KiB = 256 MiB
 
@@ -48,6 +52,10 @@ MIN_MASTER_WORDS=3
 MIN_MASTER_BYTES=12
 SEP=$'\x1f'
 VAULT_HEADER="# nexopass vault v1"
+
+declare -A KR=() # account name -> master, while unlocked
+QKEY=""          # key that encrypts the keyring, while unlocked
+UNLOCKED=0
 
 die() { echo "${RED:-}[!]${RST:-} $*" >&2; exit 1; }
 info() { echo "${CYAN}[*]${RST} $*" >&2; }
@@ -65,47 +73,58 @@ setup_colors() {
 
 usage() {
     cat <<EOF
-${BOLD}${MAGENTA}NexoPass${RST} $NEXOPASS_VERSION - passwords derived from one master, nothing stored in plain text.
+${BOLD}${MAGENTA}NexoPass${RST} $NEXOPASS_VERSION - passwords derived from a master, nothing stored in plain text.
 
 ${BOLD}Usage:${RST} nexopass [command] [site] [options]
 
 ${BOLD}Passwords:${RST}
-  ${CYAN}get${RST} <site>        Show the password for a site (adds the site on first use)
-  ${CYAN}rotate${RST} <site>     After a breach: switch to the next version, archive the old one
-  ${CYAN}list${RST}              List your sites with their current version
-  ${CYAN}history${RST} <site>    Show all versions of a site, old ones included
-  ${CYAN}remove${RST} <site>     Remove a site from the list (passwords themselves don't change)
+  ${CYAN}get${RST} <site>          Show the password for a site (adds the site on first use)
+  ${CYAN}rotate${RST} <site>       After a breach: switch to the next version, archive the old one
+  ${CYAN}list${RST}                List your sites with their current version
+  ${CYAN}history${RST} <site>      Show all versions of a site, old ones included
+  ${CYAN}remove${RST} <site>       Remove a site and its history from the list
+                      (with -v N: remove only archived version N)
 
-${BOLD}Vault and security:${RST}
-  ${CYAN}settings${RST}          Quick unlock (PIN/password), auto-lock, clipboard, defaults...
-  ${CYAN}export${RST} [file]     Save an encrypted copy of your site list (opens on the phone too)
-  ${CYAN}import${RST} <file>     Merge an exported site list into this one
-  ${CYAN}lock${RST}              Forget the remembered master right now
-  ${CYAN}show-master${RST}       Show your master (needs your PIN/password)
-  ${CYAN}new-master${RST} [N]    Generate a random master of N words (default 6)
-  ${CYAN}about${RST}             Version, author, license
+${BOLD}Accounts${RST} (each has its own master and site list; one app password for all):
+  ${CYAN}accounts${RST}                     List your accounts
+  ${CYAN}account new${RST} <name>           Add an account: a new master, or one you use on the phone
+  ${CYAN}account use${RST} <name>           Switch the default account
+  ${CYAN}account rename${RST} <old> <new>   Rename an account
+  ${CYAN}account detach${RST} [name]        Remove an account from this computer
+                               (app password, its master and "yes"; offers a backup)
+
+${BOLD}Security and data:${RST}
+  ${CYAN}settings${RST}            App password, stay unlocked, clipboard, defaults...
+  ${CYAN}passwd${RST}              Change the app password/PIN
+  ${CYAN}show-master${RST}         Show the account's master (asks for the app password)
+  ${CYAN}export${RST} [file]       Encrypted copy of the account's site list (opens on the phone too)
+  ${CYAN}import${RST} <file>       Merge an export into the account's site list
+  ${CYAN}lock${RST}                Lock now
+  ${CYAN}new-master${RST} [N]      Generate a random master of N words (default 6)
+  ${CYAN}about${RST}               Version, author, license
 
   nexopass <site>   Same as: nexopass get <site>
   nexopass          Interactive session: unlock once, then type commands
 
 ${BOLD}Options:${RST}
-  -u, --user NAME    Account name, for several accounts on one site
+  -A, --account NAME Use this account for one command
+  -u, --user NAME    Login name, for several logins on one site
+  -w, --words N      Password of N words (5-15); when adding or rotating
   -n, --length N     Random characters (12-64) instead of words, for sites
-                     with a length limit; set when adding or rotating a site
-  -v, --version N    Start a new site at version N (e.g. already rotated on phone)
+                     with a length limit; when adding or rotating
+  -v, --version N    New site: start at version N. remove: archived version N
   -c, --copy         Copy to clipboard instead of printing
   -s, --show         With list/history: also show the passwords
   -h, --help         Show this help
 
-Case never matters. The master is ${MIN_MASTER_WORDS}+ words separated by spaces:
-3 is the minimum, 4 recommended, 6 the safest.
+Case never matters. A master is ${MIN_MASTER_WORDS}+ words: 3 the minimum, 4 recommended, 6 the safest.
 EOF
 }
 
 about() {
     cat <<EOF
 ${BOLD}${MAGENTA}NexoPass${RST} $NEXOPASS_VERSION
-Passwords derived from one master, nothing stored in plain text.
+Passwords derived from a master, nothing stored in plain text.
 Compatible with the NexoPass Android app.
 
 Made by ${BOLD}Nexoniarz${RST}
@@ -117,26 +136,62 @@ EOF
 # Plain key=value file, nothing secret in it. Unknown or invalid lines are ignored.
 
 load_config() {
-    CFG_CACHE=5 CFG_CLIP=30 CFG_LENGTH=0 CFG_COLOR=auto CFG_ATTEMPTS=5
+    CFG_CACHE=5 CFG_CLIP=30 CFG_MODE=words CFG_COLOR=auto CFG_ATTEMPTS=5 CFG_ACCOUNT=main
     [[ -f $CONFIG ]] || return 0
     local k v
     while IFS='=' read -r k v; do
         case $k in
         cache_minutes) [[ $v =~ ^(0|1|5|15|30|60)$ ]] && CFG_CACHE=$v ;;
         clip_seconds) [[ $v =~ ^(10|15|30|60|120)$ ]] && CFG_CLIP=$v ;;
-        default_length) [[ $v == 0 || $v =~ ^(1[2-9]|[2-5][0-9]|6[0-4])$ ]] && CFG_LENGTH=$v ;;
+        default_mode) valid_mode "$v" && CFG_MODE=$v ;;
         color) [[ $v =~ ^(auto|never)$ ]] && CFG_COLOR=$v ;;
         max_attempts) [[ $v =~ ^(3|5|10)$ ]] && CFG_ATTEMPTS=$v ;;
+        current_account) account_name_ok "$v" && CFG_ACCOUNT=$v ;;
         esac
     done <"$CONFIG"
+    return 0
 }
 
 save_config() {
     mkdir -p "$(dirname "$CONFIG")"
     printf '%s\n' "# NexoPass settings, change with: nexopass settings" \
-        "cache_minutes=$CFG_CACHE" "clip_seconds=$CFG_CLIP" "default_length=$CFG_LENGTH" \
-        "color=$CFG_COLOR" "max_attempts=$CFG_ATTEMPTS" >"$CONFIG.tmp"
+        "cache_minutes=$CFG_CACHE" "clip_seconds=$CFG_CLIP" "default_mode=$CFG_MODE" \
+        "color=$CFG_COLOR" "max_attempts=$CFG_ATTEMPTS" "current_account=$CFG_ACCOUNT" >"$CONFIG.tmp"
     mv "$CONFIG.tmp" "$CONFIG"
+}
+
+# --- accounts ---------------------------------------------------------------
+# Every account has its own folder with vault.gpg (its site list).
+
+account_name_ok() { [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
+
+select_account() {
+    ACCOUNT=$1
+    DATA_DIR="$ACCOUNTS_DIR/$1"
+    VAULT="$DATA_DIR/vault.gpg"
+    UNLOCKED=0
+}
+
+account_exists() { [[ -f $ACCOUNTS_DIR/$1/vault.gpg ]]; }
+
+account_names() {
+    local d
+    for d in "$ACCOUNTS_DIR"/*/; do
+        [[ -f $d/vault.gpg ]] && basename "$d"
+    done
+    return 0
+}
+
+# Older versions kept one vault directly in the data folder: it becomes the
+# account "main". Its master is asked once, then the app password is set.
+migrate_layout() {
+    [[ -f $BASE_DIR/vault.gpg && ! -e $ACCOUNTS_DIR/main ]] || return 0
+    (umask 077 && mkdir -p "$ACCOUNTS_DIR/main")
+    mv "$BASE_DIR/vault.gpg" "$ACCOUNTS_DIR/main/vault.gpg"
+    [[ -f $BASE_DIR/vault.gpg.bak ]] && mv "$BASE_DIR/vault.gpg.bak" "$ACCOUNTS_DIR/main/vault.gpg.bak"
+    rm -f "$BASE_DIR/quick.gpg" "$BASE_DIR/quick.meta"
+    MIGRATED=1
+    return 0
 }
 
 # --- normalization ----------------------------------------------------------
@@ -256,14 +311,36 @@ load_words() {
     done <"$WORDLIST"
 }
 
+valid_mode() {
+    [[ $1 == words || $1 =~ ^words([6-9]|1[0-5])$ || $1 =~ ^chars(1[2-9]|[2-5][0-9]|6[0-4])$ ]]
+}
+
+# words_mode <n>: 5 stays "words" so older entries keep their passwords.
+words_mode() {
+    if (($1 == WORD_COUNT)); then echo words; else echo "words$1"; fi
+}
+
+# Mode for a new site or version: -w / -n win, else <fallback>.
+pick_mode() {
+    if [[ -n $WORDS_ARG ]]; then
+        words_mode "$WORDS_ARG"
+    elif [[ -n $LENGTH ]]; then
+        echo "chars$LENGTH"
+    else
+        echo "$1"
+    fi
+}
+
 # make_password <site> <user> <version> <mode>: result in PASSWORD.
 make_password() {
     local site=$1 user=$2 version=$3 mode=$4 hex i j t
     hex=$(derive_hex "$SALT_PREFIX:site:$site:$version:$mode:$user" "$SITE_BYTES") || die "Argon2 failed."
     load_ints "$hex"
     PASSWORD=""
-    if [[ $mode == words ]]; then
-        for ((i = 0; i < WORD_COUNT; i++)); do
+    if [[ $mode == words* ]]; then
+        local count=${mode#words}
+        count=${count:-$WORD_COUNT}
+        for ((i = 0; i < count; i++)); do
             pick "${#WORDS[@]}"
             PASSWORD+="${PASSWORD:+-}${WORDS[REPLY]^}"
         done
@@ -416,28 +493,182 @@ merge_records() {
     done
 }
 
-# --- unlocking --------------------------------------------------------------
-# Order: master remembered in the kernel keyring (if "stay unlocked" is on),
-# then quick unlock (PIN/password), then the master itself.
+# --- keyring and app password -----------------------------------------------
+# keyring.gpg: one line per account, "name<0x1F>master", encrypted with QKEY =
+# Argon2id(app password, random salt). keyring.meta: method, salt, failed tries.
+
+keyring_method() {
+    [[ -f $KEYRING && -f $KEYRING_META ]] || return 1
+    sed -n 's/^method=//p' "$KEYRING_META"
+}
+
+keyring_meta_get() { sed -n "s/^$1=//p" "$KEYRING_META"; }
+
+keyring_set_failed() {
+    printf 'method=%s\nsalt=%s\nfailed=%s\n' "$(keyring_meta_get method)" "$(keyring_meta_get salt)" "$1" >"$KEYRING_META"
+}
+
+app_name() {
+    if [[ $(keyring_method) == pin ]]; then echo PIN; else echo "app password"; fi
+}
+
+keyring_parse() {
+    KR=()
+    local line
+    while IFS= read -r line; do
+        [[ $line == *"$SEP"* ]] || continue
+        KR[${line%%"$SEP"*}]=${line#*"$SEP"}
+    done <<<"$1"
+}
+
+keyring_text() {
+    local n
+    for n in "${!KR[@]}"; do
+        printf '%s\n' "$n$SEP${KR[$n]}"
+    done
+}
+
+keyring_save() {
+    [[ -n $QKEY ]] || die "Internal error: keyring key missing."
+    (umask 077 && mkdir -p "$BASE_DIR")
+    keyring_text | gpg_pass "$QKEY" --yes --symmetric --cipher-algo AES256 --output "$KEYRING.tmp" ||
+        die "Could not save the keyring."
+    mv "$KEYRING.tmp" "$KEYRING"
+    chmod 600 "$KEYRING"
+}
+
+# Re-reads the keyring with the key we already have (after another command changed it).
+keyring_reload() {
+    [[ -n $QKEY && -f $KEYRING ]] || return 1
+    local text
+    text=$(gpg_pass "$QKEY" --decrypt "$KEYRING" 2>/dev/null) || return 1
+    keyring_parse "$text"
+}
+
+app_key() {
+    printf '%s' "$1" | argon2 "$2" -id -t "$QUICK_T" -m "$QUICK_M" -p 1 -l 32 -r
+}
+
+# app_try <secret>: 0 = unlocked, 1 = wrong, 2 = too many wrong (keyring removed).
+app_try() {
+    local key text failed left
+    key=$(app_key "$1" "$(keyring_meta_get salt)") || die "Argon2 failed."
+    if text=$(gpg_pass "$key" --decrypt "$KEYRING" 2>/dev/null); then
+        QKEY=$key
+        keyring_parse "$text"
+        keyring_set_failed 0
+        return 0
+    fi
+    failed=$(($(keyring_meta_get failed) + 1))
+    left=$((CFG_ATTEMPTS - failed))
+    if ((left <= 0)); then
+        rm -f "$KEYRING" "$KEYRING_META"
+        warn "Too many wrong attempts: the app password was removed. Recover with your master."
+        return 2
+    fi
+    keyring_set_failed "$failed"
+    warn "Wrong $(app_name). $left attempt(s) left."
+    return 1
+}
+
+# Asks for the app password until it works. Fails on empty input (recover
+# with the master) or when the attempts run out.
+app_unlock() {
+    local secret rc name
+    name=$(app_name)
+    while true; do
+        read -rsp "${BOLD}${name^}${RST} ${DIM}(forgot it? press Enter to recover with your master)${RST}: " secret </dev/tty
+        echo >&2
+        [[ -n $secret ]] || return 1
+        info "Unlocking..."
+        rc=0
+        app_try "$secret" || rc=$?
+        case $rc in
+        0) return 0 ;;
+        2) return 1 ;;
+        esac
+    done
+}
+
+# Asks once for the current app password: for passwd, show-master, detach.
+app_confirm() {
+    local secret rc=0
+    keyring_method >/dev/null || die "No app password is set yet."
+    read -rsp "${BOLD}Current $(app_name)${RST}: " secret </dev/tty
+    echo >&2
+    app_try "$secret" || rc=$?
+    ((rc == 0)) || die "Not confirmed."
+}
+
+# app_password_setup <password|pin>: new secret twice, new salt, keyring re-saved.
+app_password_setup() {
+    local method=$1 name secret again salt
+    name=PIN
+    [[ $method == password ]] && name=password
+    if [[ $method == pin ]]; then
+        warn "This PC has no TPM chip, so anyone who copies your keyring file can try"
+        warn "PINs offline. A 6-digit PIN holds for days, not years. A password is safer."
+    fi
+    while true; do
+        read -rsp "New $name: " secret </dev/tty
+        echo >&2
+        if [[ $method == pin && ! $secret =~ ^[0-9]{6,32}$ ]]; then
+            warn "A PIN is 6 to 32 digits."
+            continue
+        elif [[ $method == password ]] && ((${#secret} < 8)); then
+            warn "Use at least 8 characters."
+            continue
+        fi
+        read -rsp "Repeat $name: " again </dev/tty
+        echo >&2
+        [[ $secret == "$again" ]] && break
+        warn "They don't match, try again."
+    done
+    info "Saving..."
+    salt=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+    QKEY=$(app_key "$secret" "$salt") || die "Argon2 failed."
+    (umask 077 && mkdir -p "$BASE_DIR")
+    printf 'method=%s\nsalt=%s\nfailed=0\n' "$method" "$salt" >"$KEYRING_META"
+    chmod 600 "$KEYRING_META"
+    keyring_save
+    ok "From now on you unlock NexoPass with this $name."
+}
+
+choose_app_password() {
+    local choice
+    read -rp "Unlock NexoPass with a [p]assword (recommended) or a P[I]N? [p] " choice </dev/tty
+    case ${choice,,} in
+    i*) app_password_setup pin ;;
+    *) app_password_setup password ;;
+    esac
+}
+
+# --- "stay unlocked" --------------------------------------------------------
+# The keyring key and the keyring stay in the kernel keyring for a few minutes.
 
 cache_name() {
     local h
-    h=$(printf '%s' "$VAULT" | sha256sum)
+    h=$(printf '%s' "$BASE_DIR" | sha256sum)
     printf 'nexopass:%s' "${h:0:16}"
 }
 
 cache_get() {
     ((CFG_CACHE > 0)) || return 1
-    local id
+    local id data
     id=$(keyctl search @u user "$(cache_name)" 2>/dev/null) || return 1
-    MASTER=$(keyctl pipe "$id" 2>/dev/null) || return 1
+    data=$(keyctl pipe "$id" 2>/dev/null) || return 1
+    QKEY=${data%%$'\n'*}
+    keyring_parse "${data#*$'\n'}"
     keyctl timeout "$id" $((CFG_CACHE * 60)) &>/dev/null || true
 }
 
 cache_put() {
-    ((CFG_CACHE > 0)) || return 0
+    ((CFG_CACHE > 0)) && [[ -n $QKEY ]] || return 0
     local id
-    id=$(printf '%s' "$MASTER" | keyctl padd user "$(cache_name)" @u) || return 0
+    id=$({
+        printf '%s\n' "$QKEY"
+        keyring_text
+    } | keyctl padd user "$(cache_name)" @u) || return 0
     keyctl timeout "$id" $((CFG_CACHE * 60)) &>/dev/null || true
 }
 
@@ -447,115 +678,33 @@ cache_clear() {
     keyctl unlink "$id" @u &>/dev/null || true
 }
 
-quick_method() {
-    [[ -f $QUICK && -f $QUICK_META ]] || return 1
-    sed -n 's/^method=//p' "$QUICK_META"
-}
-
-quick_meta_get() { sed -n "s/^$1=//p" "$QUICK_META"; }
-
-quick_meta_set_failed() {
-    local m s
-    m=$(quick_meta_get method)
-    s=$(quick_meta_get salt)
-    printf 'method=%s\nsalt=%s\nfailed=%s\n' "$m" "$s" "$1" >"$QUICK_META"
-}
-
-quick_key() {
-    printf '%s' "$1" | argon2 "$2" -id -t "$QUICK_T" -m "$QUICK_M" -p 1 -l 32 -r
-}
-
-quick_remove() {
-    rm -f "$QUICK" "$QUICK_META"
-}
-
-# Asks for the PIN/password until it works or the attempts run out.
-# Fails (so the caller asks for the master) on empty input.
-quick_unlock() {
-    local method name secret key salt failed left
-    method=$(quick_method) || return 1
-    name=PIN
-    [[ $method == password ]] && name=Password
-    salt=$(quick_meta_get salt)
-    while true; do
-        read -rsp "${BOLD}$name${RST} ${DIM}(Enter = use master)${RST}: " secret </dev/tty
-        echo >&2
-        [[ -n $secret ]] || return 1
-        info "Unlocking..."
-        key=$(quick_key "$secret" "$salt") || die "Argon2 failed."
-        if MASTER=$(gpg_pass "$key" --decrypt "$QUICK" 2>/dev/null); then
-            quick_meta_set_failed 0
-            return 0
-        fi
-        failed=$(($(quick_meta_get failed) + 1))
-        left=$((CFG_ATTEMPTS - failed))
-        if ((left <= 0)); then
-            quick_remove
-            warn "Too many wrong attempts: quick unlock removed. Use your master, then set it up again in settings."
-            return 1
-        fi
-        quick_meta_set_failed "$failed"
-        warn "Wrong ${name,,}. $left attempt(s) left."
-    done
-}
-
-# Asks for the PIN/password once without counting it as unlock; for show-master.
-quick_verify() {
-    local method name secret key
-    method=$(quick_method) || return 1
-    name=PIN
-    [[ $method == password ]] && name=Password
-    read -rsp "${BOLD}$name${RST}: " secret </dev/tty
-    echo >&2
-    key=$(quick_key "$secret" "$(quick_meta_get salt)") || return 1
-    QUICK_MASTER=$(gpg_pass "$key" --decrypt "$QUICK" 2>/dev/null)
-}
-
-quick_setup() {
-    local method=$1 name secret again salt key
-    name=PIN
-    [[ $method == password ]] && name=password
-    if [[ $method == pin ]]; then
-        warn "This PC has no TPM chip, so anyone who copies your quick-unlock file can try"
-        warn "PINs offline. A 6-digit PIN holds for days, not years. A password is safer."
-    fi
-    read -rsp "New $name: " secret </dev/tty
-    echo >&2
-    if [[ $method == pin ]]; then
-        [[ $secret =~ ^[0-9]{6,32}$ ]] || die "A PIN is 6 to 32 digits."
-    else
-        ((${#secret} >= 8)) || die "A password needs at least 8 characters."
-    fi
-    read -rsp "Repeat $name: " again </dev/tty
-    echo >&2
-    [[ $secret == "$again" ]] || die "They don't match."
-    info "Saving..."
-    salt=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
-    key=$(quick_key "$secret" "$salt") || die "Argon2 failed."
-    (umask 077 && mkdir -p "$DATA_DIR")
-    printf '%s' "$MASTER" | gpg_pass "$key" --yes --symmetric --cipher-algo AES256 --output "$QUICK.tmp" ||
-        die "Could not save quick unlock."
-    mv "$QUICK.tmp" "$QUICK"
-    printf 'method=%s\nsalt=%s\nfailed=0\n' "$method" "$salt" >"$QUICK_META"
-    chmod 600 "$QUICK" "$QUICK_META"
-    ok "Quick unlock with a $name is on. Your master still works too."
-}
+# --- unlocking --------------------------------------------------------------
 
 read_master() {
     local raw
-    read -rsp "${BOLD}Master:${RST} " raw </dev/tty
+    read -rsp "${BOLD}${1:-Master}:${RST} " raw </dev/tty
     echo >&2
     normalize_master "$raw"
     [[ -n $MASTER ]] || die "Empty master."
     ((${#MASTER} <= 127)) || die "Master is too long (max 127 bytes)."
 }
 
-# First run: the master is typed twice, must meet the minimum, and the vault
-# is created right away.
-create_vault() {
-    local first strength raw choice
-    echo "${BOLD}Welcome to NexoPass.${RST} No vault yet, so let's create one."
-    echo "Your master is ${MIN_MASTER_WORDS}+ words: 3 is the minimum, 4 recommended, 6 the safest."
+# Unlocks the app (keyring). Leaves KR empty when recovering with a master.
+unlock_app() {
+    [[ -n $QKEY ]] && return 0
+    cache_get && return 0
+    if keyring_method >/dev/null; then
+        app_unlock && return 0
+        RECOVERING=1
+    fi
+    return 0
+}
+
+# create_account <name>: master twice, vault created, master added to the keyring.
+create_account() {
+    local name=$1 first strength raw
+    echo "Type the master for account ${BOLD}$name${RST}: a new one, or the one you already use"
+    echo "on your phone. ${MIN_MASTER_WORDS}+ words: 3 the minimum, 4 recommended, 6 the safest."
     echo "Need one? Run: ${CYAN}nexopass new-master${RST}"
     read_master
     first=$MASTER
@@ -566,44 +715,79 @@ create_vault() {
     [[ $MASTER == "$first" ]] || die "Masters don't match."
     info "Master strength: ${BOLD}$strength${RST}"
     info "Check words: ${BOLD}$(check_words)${RST} (the phone app shows the same for the same master)"
+    select_account "$name"
     VAULT_KEY=$(derive_hex "$SALT_PREFIX:vault" 32) || die "Argon2 failed."
     R_SITE=() R_USER=() R_VER=() R_MODE=() R_SINCE=() R_UNTIL=()
     vault_save
-    ok "Vault created."
-    read -rp "Set up quick unlock so you don't type the master every time? [p]assword / P[I]N / [n]o: " choice </dev/tty
-    case ${choice,,} in
-    p*) quick_setup password ;;
-    i*) quick_setup pin ;;
-    esac
+    KR[$name]=$MASTER
+    ok "Account '$name' created. Keep its master in your head: it's the way to recover."
+    if [[ -n $QKEY ]]; then
+        keyring_save
+    else
+        choose_app_password
+    fi
+    UNLOCKED=1
 }
 
-unlock() {
-    if [[ ! -f $VAULT ]]; then
-        create_vault
-        cache_put
-        return
+first_run() {
+    local name
+    echo "${BOLD}Welcome to NexoPass.${RST} Let's create your first account."
+    read -rp "Account name [main]: " name </dev/tty
+    name=${name:-main}
+    name=${name,,}
+    account_name_ok "$name" || die "Use lowercase letters, digits, - or _."
+    create_account "$name"
+    CFG_ACCOUNT=$name
+    save_config
+}
+
+# Opens the selected account: its master comes from the keyring, or is typed
+# once (new since an update, skipped during recovery, or recovering).
+open_account() {
+    if ! account_exists "$ACCOUNT"; then
+        if [[ -z $(account_names) && -z ${ACCOUNT_OPT:-} ]]; then
+            first_run
+            cache_put
+            return
+        fi
+        die "No account '$ACCOUNT'. See: nexopass accounts"
     fi
-    local from=typed
-    if cache_get; then
-        from=cache
-    elif quick_unlock; then
-        from=quick
-    else
-        read_master
+    local typed=0
+    MASTER=${KR[$ACCOUNT]:-}
+    if [[ -z $MASTER ]]; then
+        typed=1
+        if ((${MIGRATED:-0})); then
+            info "NexoPass now has accounts and an app password. Your vault is account 'main':"
+            info "enter its master once, then choose the app password."
+        elif ((${RECOVERING:-0})); then
+            info "Recovering: enter the master of account '$ACCOUNT', then set a new app password."
+            info "Your other accounts will ask for their master once, the next time you use them."
+        elif [[ -n $QKEY ]]; then
+            info "Account '$ACCOUNT' isn't in the keyring yet: enter its master once."
+        else
+            info "Enter the master of account '$ACCOUNT' once, then choose an app password."
+        fi
+        read_master "Master of '$ACCOUNT'"
+        info "Unlocking..."
     fi
-    [[ $from == typed ]] && info "Unlocking..."
     VAULT_KEY=$(derive_hex "$SALT_PREFIX:vault" 32) || die "Argon2 failed."
     if ! vault_load; then
-        [[ $from == cache ]] && cache_clear
-        die "Cannot open the vault: wrong master?"
+        ((typed)) && die "Cannot open account '$ACCOUNT': wrong master?"
+        die "The saved master no longer opens '$ACCOUNT'. Detach and re-add it."
+    fi
+    if ((typed)); then
+        KR[$ACCOUNT]=$MASTER
+        if [[ -n $QKEY ]]; then keyring_save; else choose_app_password; fi
+        RECOVERING=0
     fi
     cache_put
     UNLOCKED=1
 }
 
 ensure_unlocked() {
-    ((${UNLOCKED:-0})) || unlock
-    UNLOCKED=1
+    ((UNLOCKED)) && return 0
+    unlock_app
+    open_account
 }
 
 # --- typo suggestions -------------------------------------------------------
@@ -696,7 +880,11 @@ ask_yes() {
 }
 
 mode_label() {
-    if [[ $1 == words ]]; then echo "words"; else echo "${1#chars} characters"; fi
+    case $1 in
+    words) echo "5 words" ;;
+    words*) echo "${1#words} words" ;;
+    *) echo "${1#chars} characters" ;;
+    esac
 }
 
 # --- commands ---------------------------------------------------------------
@@ -711,14 +899,12 @@ cmd_get() {
     local i mode
     if resolve_typo; then
         i=$REPLY
-        [[ -z $LENGTH || ${R_MODE[i]} == "chars$LENGTH" ]] ||
-            info "Length is fixed per version; use 'rotate -n $LENGTH' to change it."
+        [[ -z $LENGTH$WORDS_ARG || ${R_MODE[i]} == "$(pick_mode "${R_MODE[i]}")" ]] ||
+            info "Length is fixed per version; use rotate with -w/-n to change it."
         [[ -z $VERSION_ARG || $VERSION_ARG == "${R_VER[i]}" ]] ||
             die "$(label "$SITE" "$USER_NAME" "${R_VER[i]}") is already saved; use rotate to move to a newer version."
     else
-        mode=words
-        ((CFG_LENGTH)) && mode="chars$CFG_LENGTH"
-        [[ -n $LENGTH ]] && mode="chars$LENGTH"
+        mode=$(pick_mode "$CFG_MODE")
         ask_yes "Add '$(label "$SITE" "$USER_NAME")' to your list?" || die "Cancelled."
         add_record "$SITE" "$USER_NAME" "${VERSION_ARG:-1}" "$mode"
         vault_save
@@ -733,8 +919,7 @@ cmd_rotate() {
     need_site
     resolve_typo || die "'$SITE' is not on your list. Use: nexopass get $SITE_ARG"
     local i=$REPLY mode version
-    mode=${R_MODE[i]}
-    [[ -n $LENGTH ]] && mode="chars$LENGTH"
+    mode=$(pick_mode "${R_MODE[i]}")
     version=$((R_VER[i] + 1))
     ask_yes "Archive version ${R_VER[i]} of $(label "$SITE" "$USER_NAME") and switch to version $version?" || die "Cancelled."
     R_UNTIL[i]=$(date +%F)
@@ -791,11 +976,27 @@ cmd_history() {
 cmd_remove() {
     need_site
     resolve_typo || die "'$SITE' is not on your list."
-    ask_yes "Remove $(label "$SITE" "$USER_NAME") and its history from the list?" || die "Cancelled."
+    local cur=$REPLY only=""
+    if [[ -n $WORDS_ARG ]]; then
+        [[ $WORDS_ARG =~ ^([5-9]|1[0-5])$ ]] || die "Words must be 5-15."
+        [[ -z $LENGTH ]] || die "Pick either -w (words) or -n (characters)."
+    fi
+    if [[ -n $VERSION_ARG ]]; then
+        [[ $VERSION_ARG != "${R_VER[cur]}" ]] || die "v$VERSION_ARG is the current version; to drop it, rotate first or remove the whole site."
+        local i found=0
+        for i in "${!R_SITE[@]}"; do
+            [[ ${R_SITE[i]} == "$SITE" && ${R_USER[i]} == "$USER_NAME" && ${R_VER[i]} == "$VERSION_ARG" ]] && found=1
+        done
+        ((found)) || die "$(label "$SITE" "$USER_NAME") has no archived v$VERSION_ARG."
+        only=$VERSION_ARG
+        ask_yes "Remove archived $(label "$SITE" "$USER_NAME" "$only") from the list?" || die "Cancelled."
+    else
+        ask_yes "Remove $(label "$SITE" "$USER_NAME") and its whole history from the list?" || die "Cancelled."
+    fi
     local i
     local -a s=() u=() v=() m=() a=() b=()
     for i in "${!R_SITE[@]}"; do
-        [[ ${R_SITE[i]} == "$SITE" && ${R_USER[i]} == "$USER_NAME" ]] && continue
+        [[ ${R_SITE[i]} == "$SITE" && ${R_USER[i]} == "$USER_NAME" && (-z $only || ${R_VER[i]} == "$only") ]] && continue
         s+=("${R_SITE[i]}") u+=("${R_USER[i]}") v+=("${R_VER[i]}") m+=("${R_MODE[i]}") a+=("${R_SINCE[i]}") b+=("${R_UNTIL[i]}")
     done
     R_SITE=("${s[@]}") R_USER=("${u[@]}") R_VER=("${v[@]}") R_MODE=("${m[@]}") R_SINCE=("${a[@]}") R_UNTIL=("${b[@]}")
@@ -804,7 +1005,7 @@ cmd_remove() {
 }
 
 cmd_export() {
-    local file=${SITE_ARG:-$HOME/nexopass-$(date +%F).pgp} pass
+    local file=${SITE_ARG:-$HOME/nexopass-$ACCOUNT-$(date +%F).pgp} pass
     [[ -e $file ]] && { ask_yes "$file exists. Overwrite?" || die "Cancelled."; }
     pass=$(derive_hex "$SALT_PREFIX:export" 32) || die "Argon2 failed."
     vault_text | gpg_pass "$pass" --yes --symmetric --cipher-algo AES256 --output "$file" || die "Export failed."
@@ -827,11 +1028,26 @@ cmd_import() {
     ok "Imported. ${#I_SITE[@]} entries read, list went from $before to ${#R_SITE[@]} entries."
 }
 
+
 cmd_show_master() {
-    quick_method >/dev/null || die "Quick unlock is off, so nothing is stored: your master is only in your head."
+    account_exists "$ACCOUNT" || die "No account '$ACCOUNT'."
+    keyring_method >/dev/null || die "No app password yet: unlock once to set it up."
     warn "Make sure nobody is looking at your screen."
-    quick_verify || die "Wrong PIN/password."
-    echo "    ${BOLD}${MAGENTA}$QUICK_MASTER${RST}"
+    app_confirm
+    [[ -n ${KR[$ACCOUNT]:-} ]] || die "The master of '$ACCOUNT' isn't in the keyring yet: open the account once."
+    echo "    ${BOLD}${MAGENTA}${KR[$ACCOUNT]}${RST}"
+}
+
+cmd_passwd() {
+    if keyring_method >/dev/null; then
+        app_confirm
+    else
+        ensure_unlocked
+        return
+    fi
+    choose_app_password
+    cache_clear
+    cache_put
 }
 
 cmd_lock() {
@@ -848,10 +1064,114 @@ cmd_new_master() {
     echo "${BOLD}${MAGENTA}${picked[*]}${RST}"
 }
 
+# --- accounts commands ------------------------------------------------------
+
+cmd_accounts() {
+    local n mark
+    local -a names
+    mapfile -t names < <(account_names)
+    ((${#names[@]})) || {
+        info "No accounts yet. Run nexopass to create one."
+        return
+    }
+    printf '%s  %-24s %s%s\n' "$DIM" ACCOUNT "CHANGED" "$RST"
+    for n in "${names[@]}"; do
+        mark=" "
+        [[ $n == "$CFG_ACCOUNT" ]] && mark="${GREEN}*${RST}"
+        printf '%s %s%-24s%s %s\n' "$mark" "$BOLD" "$n" "$RST" "$(date -r "$ACCOUNTS_DIR/$n/vault.gpg" +%F)"
+    done
+}
+
+cmd_account() {
+    local sub=${SITE_ARG,,} name=${ARG2,,} new=${ARG3,,}
+    case $sub in
+    "" | list) cmd_accounts ;;
+    new)
+        account_name_ok "$name" || die "Give it a name: lowercase letters, digits, - or _ (e.g. nexopass account new work)."
+        account_exists "$name" && die "There is already an account called '$name'."
+        unlock_app
+        ((${RECOVERING:-0})) && die "Unlock with your app password first (or recover an existing account)."
+        create_account "$name"
+        cache_clear
+        cache_put
+        if [[ $CFG_ACCOUNT != "$name" ]] && ask_yes "Switch to '$name' now?"; then
+            CFG_ACCOUNT=$name
+            save_config
+        fi
+        ;;
+    use)
+        account_exists "$name" || die "No account '$name'. See: nexopass accounts"
+        CFG_ACCOUNT=$name
+        save_config
+        ok "Now using account ${BOLD}$name${RST}."
+        ;;
+    rename)
+        account_exists "$name" || die "No account '$name'."
+        account_name_ok "$new" || die "New name: lowercase letters, digits, - or _."
+        [[ -e $ACCOUNTS_DIR/$new ]] && die "There is already an account called '$new'."
+        unlock_app
+        mv "$ACCOUNTS_DIR/$name" "$ACCOUNTS_DIR/$new"
+        if [[ -n $QKEY ]]; then
+            if [[ -n ${KR[$name]:-} ]]; then
+                KR[$new]=${KR[$name]}
+                unset 'KR[$name]'
+            fi
+            keyring_save
+            cache_clear
+            cache_put
+        fi
+        if [[ $CFG_ACCOUNT == "$name" ]]; then
+            CFG_ACCOUNT=$new
+            save_config
+        fi
+        ok "Renamed '$name' to '$new'."
+        ;;
+    detach) cmd_detach "${name:-$ACCOUNT}" ;;
+    *) die "Unknown: account $sub. Use: accounts, account new|use|rename|detach" ;;
+    esac
+}
+
+# Removes an account from this computer: app password, its master and "yes".
+cmd_detach() {
+    local name=$1 ans rest=""
+    account_exists "$name" || die "No account '$name'."
+    select_account "$name"
+    echo "${RED}${BOLD}Detach account '$name'${RST}"
+    echo "This removes the account from this computer: its site list with the archive and its"
+    echo "saved master. Your logins keep their passwords and the master can recreate them,"
+    echo "but the site list is gone unless you have an export (or it's still on your phone)."
+    if ask_yes "Export a backup of '$name' first?"; then
+        ensure_unlocked
+        SITE_ARG=""
+        cmd_export
+    fi
+    keyring_method >/dev/null && app_confirm
+    read_master "Master of '$name'"
+    info "Checking the master..."
+    VAULT_KEY=$(derive_hex "$SALT_PREFIX:vault" 32) || die "Argon2 failed."
+    vault_load || die "Wrong master. Nothing was removed."
+    read -rp "Type ${BOLD}yes${RST} to detach '$name': " ans </dev/tty
+    [[ $ans == yes ]] || die "Cancelled. Nothing was removed."
+    rm -rf "${ACCOUNTS_DIR:?}/$name"
+    if [[ -n $QKEY ]]; then
+        unset 'KR[$name]'
+        keyring_save
+    fi
+    cache_clear
+    if [[ $CFG_ACCOUNT == "$name" ]]; then
+        rest=$(account_names | head -1)
+        CFG_ACCOUNT=${rest:-main}
+        save_config
+    fi
+    ok "Account '$name' detached."
+    [[ -n $rest ]] && info "Now using account '$rest'."
+    return 0
+}
+
 # --- settings menu ----------------------------------------------------------
 
 choose() { # choose <prompt> <options...>: REPLY gets the picked option
-    local prompt=$1 ans
+    local prompt=$1 ans opt
     shift
     read -rp "$prompt [$*]: " ans </dev/tty
     for opt in "$@"; do
@@ -867,35 +1187,42 @@ choose() { # choose <prompt> <options...>: REPLY gets the picked option
 cmd_settings() {
     local ans method
     while true; do
-        method=$(quick_method || echo off)
+        method=$(keyring_method || echo "not set")
         echo
-        echo "${BOLD}${MAGENTA}NexoPass settings${RST}"
-        printf '  %s1)%s Quick unlock ............. %s\n' "$BOLD" "$RST" "$method"
+        echo "${BOLD}${MAGENTA}NexoPass settings${RST}  ${DIM}account: $ACCOUNT${RST}"
+        printf '  %s1)%s Change app password ...... %s\n' "$BOLD" "$RST" "$method"
         printf '  %s2)%s Stay unlocked for ........ %s\n' "$BOLD" "$RST" "$( ((CFG_CACHE)) && echo "$CFG_CACHE min" || echo "off (always ask)")"
         printf '  %s3)%s Clipboard clears after ... %s s\n' "$BOLD" "$RST" "$CFG_CLIP"
-        printf '  %s4)%s New sites use ............ %s\n' "$BOLD" "$RST" "$( ((CFG_LENGTH)) && echo "$CFG_LENGTH characters" || echo "words")"
+        printf '  %s4)%s New sites use ............ %s\n' "$BOLD" "$RST" "$(mode_label "$CFG_MODE")"
         printf '  %s5)%s Wrong attempts allowed ... %s\n' "$BOLD" "$RST" "$CFG_ATTEMPTS"
         printf '  %s6)%s Colors ................... %s\n' "$BOLD" "$RST" "$CFG_COLOR"
         printf '  %s7)%s Show master\n' "$BOLD" "$RST"
-        printf '  %s8)%s Export vault\n' "$BOLD" "$RST"
-        printf '  %s9)%s Import vault\n' "$BOLD" "$RST"
+        printf '  %s8)%s Export site list\n' "$BOLD" "$RST"
+        printf '  %s9)%s Import site list\n' "$BOLD" "$RST"
+        printf '  %sa)%s Accounts\n' "$BOLD" "$RST"
+        printf '  %sd)%s %sDetach this account%s\n' "$BOLD" "$RST" "$RED" "$RST"
         printf '  %sl)%s Lock now\n' "$BOLD" "$RST"
-        printf '  %sa)%s About\n' "$BOLD" "$RST"
+        printf '  %si)%s About\n' "$BOLD" "$RST"
         printf '  %sq)%s Done\n' "$BOLD" "$RST"
         read -rp "Choice: " ans </dev/tty || return 0
         (
             case ${ans,,} in
-            1)
-                choose "Quick unlock" password pin off || exit 0
-                case $REPLY in
-                off) quick_remove && ok "Quick unlock is off." ;;
-                *) ensure_unlocked && quick_setup "$REPLY" ;;
-                esac
-                ;;
+            1) cmd_passwd ;;
             2) choose "Stay unlocked for (minutes, 0 = always ask)" 0 1 5 15 30 60 && CFG_CACHE=$REPLY && save_config && { ((CFG_CACHE)) || cache_clear; } ;;
             3) choose "Clear clipboard after (seconds)" 10 15 30 60 120 && CFG_CLIP=$REPLY && save_config ;;
-            4) choose "New sites use (0 = words, or a length 12-64)" 0 12 16 20 24 32 64 && CFG_LENGTH=$REPLY && save_config ;;
-            5) choose "Wrong PIN/password attempts before quick unlock is removed" 3 5 10 && CFG_ATTEMPTS=$REPLY && save_config ;;
+            4)
+                read -rp "New sites use: words (5-15) or c + characters (c12-c64), e.g. 6 or c20: " ans </dev/tty
+                if [[ $ans =~ ^([5-9]|1[0-5])$ ]]; then
+                    CFG_MODE=$(words_mode "$ans")
+                elif [[ $ans =~ ^c(1[2-9]|[2-5][0-9]|6[0-4])$ ]]; then
+                    CFG_MODE="chars${ans#c}"
+                else
+                    warn "Not changed."
+                    exit 0
+                fi
+                save_config
+                ;;
+            5) choose "Wrong app password attempts before it is removed" 3 5 10 && CFG_ATTEMPTS=$REPLY && save_config ;;
             6) choose "Colors" auto never && CFG_COLOR=$REPLY && save_config ;;
             7) cmd_show_master ;;
             8) ensure_unlocked && SITE_ARG="" && cmd_export ;;
@@ -904,8 +1231,13 @@ cmd_settings() {
                 SITE_ARG=${SITE_ARG/#\~/$HOME}
                 ensure_unlocked && cmd_import
                 ;;
+            a)
+                cmd_accounts
+                echo "Manage them with: nexopass account new|use|rename|detach <name>"
+                ;;
+            d) cmd_detach "$ACCOUNT" && exit 3 ;;
             l) cmd_lock ;;
-            a) about ;;
+            i) about ;;
             q | "") exit 3 ;;
             *) warn "Unknown choice." ;;
             esac
@@ -920,15 +1252,20 @@ cmd_settings() {
 # --- argument handling ------------------------------------------------------
 
 parse_args() {
-    CMD="" SITE_ARG="" USER_NAME="" LENGTH="" VERSION_ARG="" COPY=0 SHOW=0
+    CMD="" SITE_ARG="" ARG2="" ARG3="" USER_NAME="" LENGTH="" WORDS_ARG="" VERSION_ARG="" ACCOUNT_OPT="" COPY=0 SHOW=0
     while (($#)); do
         case $1 in
-        -u | --user | -n | --length | -v | --version)
+        -u | --user | -n | --length | -w | --words | -v | --version | -A | --account)
             (($# >= 2)) || die "$1 needs a value."
             case $1 in
-            -u | --user) USER_NAME=$(normalize_user "$2") || die "Invalid account name." ;;
+            -u | --user) USER_NAME=$(normalize_user "$2") || die "Invalid login name." ;;
             -n | --length) LENGTH=$2 ;;
+            -w | --words) WORDS_ARG=$2 ;;
             -v | --version) VERSION_ARG=$2 ;;
+            -A | --account)
+                ACCOUNT_OPT=${2,,}
+                account_name_ok "$ACCOUNT_OPT" || die "Invalid account name: $2"
+                ;;
             esac
             shift 2
             ;;
@@ -941,6 +1278,10 @@ parse_args() {
                 CMD=${1,,}
             elif [[ -z $SITE_ARG ]]; then
                 SITE_ARG=$1
+            elif [[ $CMD == account && -z $ARG2 ]]; then
+                ARG2=$1
+            elif [[ $CMD == account && -z $ARG3 ]]; then
+                ARG3=$1
             else
                 die "Unexpected argument: $1"
             fi
@@ -949,19 +1290,25 @@ parse_args() {
         esac
     done
     case $CMD in
-    get | rotate | list | history | remove | export | import | settings | lock | show-master | new-master | about | help | "") ;;
+    get | rotate | list | history | remove | export | import | settings | passwd | lock | show-master | \
+        account | accounts | new-master | about | help | "") ;;
     *) SITE_ARG=$CMD CMD=get ;;
     esac
     if [[ -n $LENGTH ]]; then
         [[ $LENGTH =~ ^[1-6][0-9]$ ]] || die "Length must be 12-64."
         ((LENGTH >= 12 && LENGTH <= 64)) || die "Length must be 12-64."
     fi
+    if [[ -n $WORDS_ARG ]]; then
+        [[ $WORDS_ARG =~ ^([5-9]|1[0-5])$ ]] || die "Words must be 5-15."
+        [[ -z $LENGTH ]] || die "Pick either -w (words) or -n (characters)."
+    fi
     if [[ -n $VERSION_ARG ]]; then
         [[ $VERSION_ARG =~ ^[1-9][0-9]{0,3}$ ]] || die "Version must be a number from 1."
     fi
+    select_account "${ACCOUNT_OPT:-$CFG_ACCOUNT}"
 }
 
-# Commands that work without unlocking.
+# Commands that do their own unlocking (or need none).
 run_plain() {
     case $CMD in
     help) usage ;;
@@ -969,6 +1316,9 @@ run_plain() {
     new-master) cmd_new_master ;;
     lock) cmd_lock ;;
     settings) cmd_settings ;;
+    passwd) cmd_passwd ;;
+    account) cmd_account ;;
+    accounts) cmd_accounts ;;
     show-master) cmd_show_master ;;
     *) return 1 ;;
     esac
@@ -996,10 +1346,10 @@ banner() {
 }
 
 session() {
-    ok "Unlocked. Commands: ${CYAN}<site>  get  rotate  list  history  remove  settings  export  import  help  quit${RST}"
+    ok "Unlocked. Commands: ${CYAN}<site>  get  rotate  list  history  remove  accounts  account  settings  help  quit${RST}"
     local line
     local -a words
-    while IFS= read -rep "${MAGENTA}nexopass›${RST} " line; do
+    while IFS= read -rep "${MAGENTA}nexopass${RST}${DIM}[$ACCOUNT]${RST}${MAGENTA}›${RST} " line; do
         read -ra words <<<"$line"
         ((${#words[@]})) || continue
         case ${words[0],,} in
@@ -1009,10 +1359,16 @@ session() {
             parse_args "${words[@]}"
             [[ -n $CMD ]] && run_command
         ) || true
+        # A command may have changed settings, accounts or the keyring.
         load_config
         setup_colors
-        # A command may have changed the vault (or settings); reload it.
-        vault_load || die "Cannot open the vault anymore."
+        keyring_reload || QKEY=""
+        if [[ $CFG_ACCOUNT != "$ACCOUNT" ]] || ! account_exists "$ACCOUNT"; then
+            select_account "$CFG_ACCOUNT"
+            info "Account: ${BOLD}$ACCOUNT${RST}"
+        fi
+        UNLOCKED=0
+        ensure_unlocked
     done
 }
 
@@ -1020,6 +1376,7 @@ main() {
     load_words
     load_config
     setup_colors
+    migrate_layout
     parse_args "$@"
     if [[ -z $CMD ]]; then
         banner

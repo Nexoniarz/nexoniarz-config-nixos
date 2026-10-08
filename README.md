@@ -35,9 +35,9 @@ My personal NixOS system configuration.
 
 ## NexoPass
 
-`nexopass` (in `modules/scripts/`) derives site passwords from one master with Argon2id, so no password is ever stored. An encrypted vault in `~/.local/share/nexopass/` keeps only the site list, current versions and an archive of old versions. Case never matters, typos get a "did you mean" prompt.
+`nexopass` (in `modules/scripts/`) derives site passwords from a master with Argon2id, so no password is ever stored. You can have several accounts, each with its own master and an encrypted site list (current versions plus an archive of old ones) in `~/.local/share/nexopass/accounts/`. One app password or PIN unlocks them all; a master is only typed to create or recover an account.
 
-Quick unlock with a password or PIN, "stay unlocked" for a few minutes (kernel keyring), encrypted export/import shared with the NexoPass Android app, and a settings menu: `nexopass settings`. Run `nexopass help` for everything else. Apache License 2.0.
+Passwords of 5-15 words or 12-64 characters, "did you mean" for typos, "stay unlocked" for a few minutes (kernel keyring), encrypted export/import shared with the NexoPass Android app, and `nexopass settings`. Run `nexopass help` for everything else. Apache License 2.0.
 
 ---
 
