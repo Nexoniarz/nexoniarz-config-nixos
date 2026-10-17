@@ -26,7 +26,7 @@ My personal NixOS system configuration.
 | `modules/audio.nix` | PipeWire |
 | `modules/desktop.nix` | Plasma, SDDM, fonts, theming |
 | `modules/users.nix` | Account, shell, Steam, Flatpak |
-| `modules/apps.nix` | Installed packages, nix-ld |
+| `modules/apps.nix` | Installed packages, nix-ld, AppImage support |
 | `modules/default-apps.nix` | MIME associations |
 | `modules/scripts.nix` | Custom scripts in `modules/scripts/` |
 | `modules/fastfetch.nix` | Installs `configs/fastfetch/config.jsonc` system-wide |

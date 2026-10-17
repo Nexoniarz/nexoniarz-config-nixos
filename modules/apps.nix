@@ -123,4 +123,9 @@ in
     libxrandr libxcursor libxcb libxkbcommon
     alsa-lib mesa zlib stdenv.cc.cc
   ];
+
+  # Registers AppImages with binfmt_misc, so ./Foo.AppImage (or a double-click
+  # in Dolphin) runs straight through appimage-run's FHS environment.
+  programs.appimage.enable = true;
+  programs.appimage.binfmt = true;
 }
