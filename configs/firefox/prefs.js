@@ -20,10 +20,36 @@
 // for that site only.
 pref("browser.contentblocking.category", "strict");
 
-// resistFingerprinting replaced by the fingerprintingProtection above. RFP
-// forced light mode, UTC time and English pages on every site.
+// Fingerprinting protection at full strength: everything resistFingerprinting
+// does (a Windows user agent and platform that agree, UTC time, a fixed core
+// count, the bundled font list, no precise GPU name, canvas noise...), but
+// switched on through fingerprintingProtection, because only that one takes
+// exceptions. The one exception: prefers-color-scheme isn't forced to light,
+// so sites still get dark mode.
+// To check it worked: coveryourtracks.eff.org should show Windows in both
+// User Agent and Platform, and timezone UTC.
 pref("privacy.resistFingerprinting", false);
-pref("privacy.spoof_english", 0);
+pref("privacy.fingerprintingProtection", true);
+pref("privacy.fingerprintingProtection.pbmode", true);
+pref("privacy.fingerprintingProtection.overrides", "+AllTargets,-CSSPrefersColorScheme");
+
+// Ask sites for English pages the way most English-speaking browsers do
+// (en-US, en), so the language header doesn't stand out. en-GB would be
+// rarer, and rarer is what gets you tracked.
+pref("intl.accept_languages", "en-US, en");
+pref("privacy.spoof_english", 2);
+
+// Sites only see base system fonts, not the ones installed on top
+// (the Microsoft core fonts made the font list 1 in 9,481).
+pref("layout.css.font-visibility.standard", 1);
+pref("layout.css.font-visibility.trackingprotection", 1);
+pref("layout.css.font-visibility.private", 1);
+pref("layout.css.font-visibility.resistFingerprinting", 1);
+
+// WebGPU tells sites about the graphics card in detail. Off breaks some
+// sites (3D, AI demos, some games); uncomment to turn it off.
+// pref("dom.webgpu.enabled", false);
+
 // First-party isolation stays ON. Every existing cookie in this profile was
 // saved with a first-party tag; turning this off makes Firefox ignore them
 // all (logged out everywhere). Works alongside Strict mode.

@@ -30,7 +30,7 @@ My personal NixOS system configuration.
 | `modules/default-apps.nix` | MIME associations |
 | `modules/scripts.nix` | Custom scripts in `modules/scripts/` |
 | `modules/fastfetch.nix` | Installs `configs/fastfetch/config.jsonc` system-wide |
-| `modules/firefox.nix` | Firefox, with prefs from `configs/firefox/prefs.js` (reapplied each start, not locked) |
+| `modules/firefox.nix` | Firefox, with prefs from `configs/firefox/prefs.js` (reapplied each start, not locked), and its own font list without the Microsoft core fonts (against font fingerprinting) |
 | `configs/` | Plain app config files (Firefox prefs, fastfetch) used by the modules |
 
 ## NexoPass
