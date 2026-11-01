@@ -1,7 +1,7 @@
 { config, pkgs, ... }:
 
 {
-  networking.hostName = "nixos";
+  networking.hostName = "nexo-pc";
   networking.networkmanager.enable = true;
 
   networking.firewall = {

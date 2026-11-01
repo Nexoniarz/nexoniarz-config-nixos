@@ -22,6 +22,7 @@ My personal NixOS system configuration.
 | `modules/locale.nix` | Timezone, locale, console keymap |
 | `modules/nix-settings.nix` | Nix features, GC, unfree |
 | `modules/security.nix` | sysctl hardening, sudo, firejail, GnuPG, polkit |
+| `modules/remote.nix` | SSH between my machines (keys only) and ZeroVRAM's port 8080, both for the home network only; fixed host names `nexo-pc` / `nexo-laptop` |
 | `modules/hardware.nix` | GPU, tablet, Bluetooth, I2C, RTL-SDR, OpenRGB, printing |
 | `modules/audio.nix` | PipeWire |
 | `modules/desktop.nix` | Plasma, SDDM, fonts, theming |

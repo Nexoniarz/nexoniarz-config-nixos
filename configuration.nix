@@ -10,6 +10,7 @@
     ./modules/locale.nix
     ./modules/nix-settings.nix
     ./modules/security.nix
+    ./modules/remote.nix
 
     # Hardware
     ./modules/hardware.nix
