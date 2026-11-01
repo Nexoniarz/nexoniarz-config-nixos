@@ -1,10 +1,11 @@
 { config, lib, pkgs, ... }:
 
-# My machines working together at home: SSH (keys only) and ZeroVRAM's zvm_node (port 8080),
-# both reachable from the home network only — not from other networks the laptop joins.
+# My machines working together at home: SSH (keys only) and ZeroVRAM's zvm_node (port 8080,
+# and 11434 where apps look for Ollama, e.g. Off Grid AI on the phone), reachable from the home
+# network only — not from other networks the laptop joins.
 let
   homeLan = "192.168.1.0/24";
-  homePorts = [ 22 8080 ];  # SSH, zvm_node
+  homePorts = [ 22 8080 11434 ];  # SSH, zvm_node, zvm_node as an Ollama server
   rule = op: port: "iptables ${op} nixos-fw -p tcp -s ${homeLan} --dport ${toString port} -j nixos-fw-accept";
 in
 {
